@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/action_add_bookmark"
+        android:title="添加书签" />
+    <item
+        android:id="@+id/action_open_bookmarks"
+        android:title="书签列表" />
+    <item
+        android:id="@+id/action_open_history"
+        android:title="浏览历史" />
+    <item
+        android:id="@+id/action_open_resources"
+        android:title="资源嗅探" />
+    <item
+        android:id="@+id/action_open_downloads"
+        android:title="下载管理" />
+    <item
+        android:id="@+id/action_download_current_video"
+        android:title="下载当前视频" />
+    <item
+        android:id="@+id/action_find_in_page"
+        android:title="页内查找" />
+    <group android:checkableBehavior="all">
+        <item
+            android:id="@+id/action_toggle_night"
+            android:checkable="true"
+            android:title="夜间模式" />
+        <item
+            android:id="@+id/action_toggle_incognito"
+            android:checkable="true"
+            android:title="无痕浏览" />
+        <item
+            android:id="@+id/action_toggle_desktop"
+            android:checkable="true"
+            android:title="电脑模式" />
+        <item
+            android:id="@+id/action_toggle_adblock"
+            android:checkable="true"
+            android:title="广告拦截" />
+        <item
+            android:id="@+id/action_toggle_most_visited"
+            android:checkable="true"
+            android:title="常访站点" />
+    </group>
+</menu>

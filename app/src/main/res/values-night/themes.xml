@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.AuroraBrowser" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/aurora_accent</item>
+        <item name="colorSecondary">@color/aurora_accent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

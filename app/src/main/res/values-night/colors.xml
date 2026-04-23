@@ -1,0 +1,12 @@
+<resources>
+    <color name="aurora_surface">#12161B</color>
+    <color name="aurora_surface_alt">#1A2027</color>
+    <color name="aurora_text">#E5E7EB</color>
+    <color name="aurora_text_muted">#9CA3AF</color>
+    <color name="aurora_line">#2D3748</color>
+    <color name="aurora_night_surface">#12161B</color>
+    <color name="aurora_night_surface_alt">#1A2027</color>
+    <color name="aurora_night_text">#E5E7EB</color>
+    <color name="aurora_night_text_muted">#9CA3AF</color>
+    <color name="aurora_accent">#3AB7A8</color>
+</resources>
