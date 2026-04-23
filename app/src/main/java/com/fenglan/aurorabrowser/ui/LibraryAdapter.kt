@@ -2,6 +2,8 @@ package com.fenglan.aurorabrowser.ui
 
 import android.view.LayoutInflater
 import android.view.ViewGroup
+import androidx.core.view.updateLayoutParams
+import androidx.core.view.updatePadding
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.RecyclerView
@@ -19,6 +21,9 @@ data class LibraryRenderItem(
     val progressPercent: Int? = null,
     val selectionMode: Boolean = false,
     val selected: Boolean = false,
+    val compact: Boolean = false,
+    val primaryIconRes: Int? = null,
+    val secondaryIconRes: Int? = null,
 )
 
 class LibraryAdapter(
@@ -79,8 +84,18 @@ class LibraryAdapter(
             binding.progressBar.progress = item.progressPercent ?: 0
             binding.selectionCheck.isVisible = item.selectionMode
             binding.selectionCheck.isChecked = item.selected
-            binding.buttonRow.isVisible = !item.selectionMode
+            val useIconActions = !item.selectionMode && (item.primaryIconRes != null || item.secondaryIconRes != null)
+            binding.buttonRow.isVisible = !item.selectionMode && !useIconActions
+            binding.actionColumn.isVisible = useIconActions
+            binding.primaryIconButton.isVisible = item.primaryIconRes != null
+            binding.primaryIconButton.isEnabled = item.primaryEnabled
+            item.primaryIconRes?.let(binding.primaryIconButton::setImageResource)
+            binding.primaryIconButton.contentDescription = item.primaryText
+            binding.secondaryIconButton.isVisible = item.secondaryIconRes != null
+            item.secondaryIconRes?.let(binding.secondaryIconButton::setImageResource)
+            binding.secondaryIconButton.contentDescription = item.secondaryText
             binding.root.alpha = if (item.selected) 0.88f else 1f
+            applyDensity(item.compact)
 
             binding.root.setOnClickListener {
                 val position = bindingAdapterPosition
@@ -109,6 +124,46 @@ class LibraryAdapter(
                     onSecondaryClick(position)
                 }
             }
+            binding.primaryIconButton.setOnClickListener {
+                val position = bindingAdapterPosition
+                if (position != RecyclerView.NO_POSITION) {
+                    onPrimaryClick(position)
+                }
+            }
+            binding.secondaryIconButton.setOnClickListener {
+                val position = bindingAdapterPosition
+                if (position != RecyclerView.NO_POSITION) {
+                    onSecondaryClick(position)
+                }
+            }
+        }
+
+        private fun applyDensity(compact: Boolean) {
+            binding.root.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                bottomMargin = dp(if (compact) 6 else 10)
+            }
+            binding.contentContainer.updatePadding(
+                left = dp(if (compact) 10 else 16),
+                top = dp(if (compact) 8 else 16),
+                right = dp(if (compact) 8 else 16),
+                bottom = dp(if (compact) 8 else 16),
+            )
+            binding.titleText.textSize = if (compact) 14f else 16f
+            binding.titleText.maxLines = if (compact) 1 else 2
+            binding.subtitleText.textSize = if (compact) 12f else 13f
+            binding.subtitleText.maxLines = if (compact) 1 else 2
+            binding.metaText.textSize = if (compact) 11f else 12f
+            binding.subtitleText.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                topMargin = dp(if (compact) 3 else 6)
+            }
+            binding.metaText.updateLayoutParams<ViewGroup.MarginLayoutParams> {
+                topMargin = dp(if (compact) 3 else 6)
+            }
+        }
+
+        private fun dp(value: Int): Int {
+            val density = binding.root.resources.displayMetrics.density
+            return (value * density + 0.5f).toInt()
         }
     }
 }

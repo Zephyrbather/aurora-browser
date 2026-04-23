@@ -777,29 +777,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
-                    add(
-                        DownloadItem(
-                            id = cursor.getLong(cursor.getColumnIndexOrThrow("id")),
-                            title = cursor.getString(cursor.getColumnIndexOrThrow("title")),
-                            sourceUrl = cursor.getString(cursor.getColumnIndexOrThrow("source_url")),
-                            pageUrl = cursor.getString(cursor.getColumnIndexOrThrow("page_url")),
-                            mimeType = cursor.getString(cursor.getColumnIndexOrThrow("mime_type")),
-                            category = FileCategory.fromValue(cursor.getString(cursor.getColumnIndexOrThrow("category"))),
-                            downloadType = cursor.getString(cursor.getColumnIndexOrThrow("download_type")),
-                            systemDownloadId = if (cursor.isNull(cursor.getColumnIndexOrThrow("system_download_id"))) {
-                                null
-                            } else {
-                                cursor.getLong(cursor.getColumnIndexOrThrow("system_download_id"))
-                            },
-                            localUri = cursor.getString(cursor.getColumnIndexOrThrow("local_uri")),
-                            status = cursor.getString(cursor.getColumnIndexOrThrow("status")),
-                            downloadedBytes = readLongOrNull(cursor, "downloaded_bytes"),
-                            fileSizeBytes = readLongOrNull(cursor, "file_size_bytes"),
-                            progressPercent = readIntOrNull(cursor, "progress_percent"),
-                            errorMessage = cursor.getString(cursor.getColumnIndexOrThrow("error_message")),
-                            createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
-                        ),
-                    )
+                    add(readDownload(cursor))
                 }
             }
         }
@@ -1186,6 +1164,30 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
             password = cursor.getString(cursor.getColumnIndexOrThrow("password")),
             createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
             updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at")),
+        )
+    }
+
+    private fun readDownload(cursor: android.database.Cursor): DownloadItem {
+        return DownloadItem(
+            id = cursor.getLong(cursor.getColumnIndexOrThrow("id")),
+            title = cursor.getString(cursor.getColumnIndexOrThrow("title")),
+            sourceUrl = cursor.getString(cursor.getColumnIndexOrThrow("source_url")),
+            pageUrl = cursor.getString(cursor.getColumnIndexOrThrow("page_url")),
+            mimeType = cursor.getString(cursor.getColumnIndexOrThrow("mime_type")),
+            category = FileCategory.fromValue(cursor.getString(cursor.getColumnIndexOrThrow("category"))),
+            downloadType = cursor.getString(cursor.getColumnIndexOrThrow("download_type")),
+            systemDownloadId = if (cursor.isNull(cursor.getColumnIndexOrThrow("system_download_id"))) {
+                null
+            } else {
+                cursor.getLong(cursor.getColumnIndexOrThrow("system_download_id"))
+            },
+            localUri = cursor.getString(cursor.getColumnIndexOrThrow("local_uri")),
+            status = cursor.getString(cursor.getColumnIndexOrThrow("status")),
+            downloadedBytes = readLongOrNull(cursor, "downloaded_bytes"),
+            fileSizeBytes = readLongOrNull(cursor, "file_size_bytes"),
+            progressPercent = readIntOrNull(cursor, "progress_percent"),
+            errorMessage = cursor.getString(cursor.getColumnIndexOrThrow("error_message")),
+            createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
         )
     }
 

@@ -296,6 +296,9 @@ class LibraryActivity : AppCompatActivity() {
                         primaryText = "搜索",
                         secondaryText = "删除",
                         leadingIconRes = R.drawable.ic_search,
+                        compact = true,
+                        primaryIconRes = R.drawable.ic_search,
+                        secondaryIconRes = R.drawable.ic_delete,
                     )
                 },
             )
@@ -314,6 +317,9 @@ class LibraryActivity : AppCompatActivity() {
                     primaryText = "打开",
                     secondaryText = "删除",
                     leadingIconRes = R.drawable.ic_history,
+                    compact = true,
+                    primaryIconRes = R.drawable.ic_browser,
+                    secondaryIconRes = R.drawable.ic_delete,
                 )
             },
         )

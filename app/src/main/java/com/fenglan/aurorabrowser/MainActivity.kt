@@ -562,7 +562,7 @@ class MainActivity : AppCompatActivity() {
         binding.overlayTip.isVisible = state.incognito
         binding.findStatus.text = "${state.findMatchOrdinal}/${state.findMatchCount}"
         binding.homeIncognitoButton.alpha = if (state.incognito) 1f else 0.55f
-        binding.tabsCountText.text = tabs.size.toString()
+        updateTabsCountBadge()
         renderHomeSectionsIfNeeded(state)
         updateCurrentTab(state)
     }
@@ -2496,7 +2496,7 @@ class MainActivity : AppCompatActivity() {
         tabs += newTab
         currentTabId = newTab.id
         navigateTo(DEFAULT_HOME_URL, userInitiated = true)
-        binding.tabsCountText.text = tabs.size.toString()
+        updateTabsCountBadge()
     }
 
     private fun switchToTab(tabId: Long) {
@@ -2504,7 +2504,7 @@ class MainActivity : AppCompatActivity() {
         updateCurrentTab(viewModel.uiState.value)
         currentTabId = tabId
         navigateTo(target.url, userInitiated = true)
-        binding.tabsCountText.text = tabs.size.toString()
+        updateTabsCountBadge()
     }
 
     private fun closeCurrentTab() {
@@ -2518,6 +2518,11 @@ class MainActivity : AppCompatActivity() {
         val target = tabs[nextIndex]
         currentTabId = target.id
         navigateTo(target.url, userInitiated = true)
+        updateTabsCountBadge()
+    }
+
+    private fun updateTabsCountBadge() {
+        binding.tabsCountText.isVisible = tabs.size > 1
         binding.tabsCountText.text = tabs.size.toString()
     }
 

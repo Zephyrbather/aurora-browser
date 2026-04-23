@@ -23,6 +23,8 @@ import com.fenglan.aurorabrowser.model.FileCategory
 import com.fenglan.aurorabrowser.model.ResourceItem
 
 object BrowserDownloads {
+    private val EXPORT_ACTIVE_STATUSES = setOf("已排队", "转码中", "重试中", "等待中")
+
     fun enqueue(
         context: Context,
         store: BrowserStore,
@@ -136,6 +138,15 @@ object BrowserDownloads {
         val localUri = item.localUri?.takeIf { it.isNotBlank() }
             ?: return "源文件不存在"
         val outputTitle = ResourceTools.ensureExtension(item.title.substringBeforeLast('.', item.title), "mp4")
+        val existingExports = store.getDownloads().filter {
+            it.sourceUrl == item.sourceUrl && it.downloadType == "hls_export"
+        }
+        if (existingExports.any { it.status in EXPORT_ACTIVE_STATUSES }) {
+            return "MP4 转码已在队列中"
+        }
+        if (existingExports.any { it.status.startsWith("已完成") && !it.localUri.isNullOrBlank() }) {
+            return "MP4 文件已存在"
+        }
         val recordId = store.insertDownload(
             title = outputTitle,
             sourceUrl = item.sourceUrl,
