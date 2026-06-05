@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginBottom="10dp"
+    android:layout_marginBottom="6dp"
     app:cardBackgroundColor="@color/aurora_surface_alt"
     app:cardCornerRadius="20dp"
     app:cardElevation="0dp"
@@ -16,7 +16,17 @@
         android:layout_height="wrap_content"
         android:gravity="top"
         android:orientation="horizontal"
-        android:padding="16dp">
+        android:padding="12dp">
+
+        <ImageView
+            android:id="@+id/thumbnailImage"
+            android:layout_width="96dp"
+            android:layout_height="64dp"
+            android:layout_marginEnd="12dp"
+            android:background="@color/aurora_line"
+            android:contentDescription="缩略图"
+            android:scaleType="centerCrop"
+            android:visibility="gone" />
 
         <LinearLayout
             android:id="@+id/textColumn"
@@ -36,7 +46,7 @@
                     android:layout_width="20dp"
                     android:layout_height="20dp"
                     android:layout_marginEnd="10dp"
-                    android:tint="@color/aurora_text"
+                    app:tint="@color/aurora_text"
                     android:visibility="gone" />
 
                 <TextView
@@ -45,9 +55,9 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:ellipsize="end"
-                    android:maxLines="2"
+                    android:maxLines="1"
                     android:textColor="@color/aurora_text"
-                    android:textSize="16sp"
+                    android:textSize="15sp"
                     android:textStyle="bold" />
 
                 <com.google.android.material.checkbox.MaterialCheckBox
@@ -99,42 +109,44 @@
                     style="@style/Widget.Material3.Button.TextButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="删除" />
+                    android:text="@string/cd_delete" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/primaryButton"
                     style="@style/Widget.Material3.Button.TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="打开" />
+                    android:text="@string/cd_open" />
             </LinearLayout>
         </LinearLayout>
 
         <LinearLayout
             android:id="@+id/actionColumn"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:gravity="top|center_horizontal"
+            android:layout_height="match_parent"
+            android:layout_marginStart="4dp"
+            android:gravity="center_vertical"
             android:orientation="vertical"
             android:visibility="gone">
 
             <ImageButton
                 android:id="@+id/primaryIconButton"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
-                android:padding="7dp"
-                android:tint="@color/aurora_text" />
+                android:padding="8dp"
+                android:contentDescription="@string/cd_item_delete"
+                app:tint="@color/aurora_text" />
 
             <ImageButton
                 android:id="@+id/secondaryIconButton"
-                android:layout_width="34dp"
-                android:layout_height="34dp"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
                 android:layout_marginTop="2dp"
                 android:background="?attr/selectableItemBackgroundBorderless"
-                android:padding="7dp"
-                android:tint="@color/aurora_text" />
+                android:padding="8dp"
+                android:contentDescription="@string/cd_item_open"
+                app:tint="@color/aurora_text" />
         </LinearLayout>
     </LinearLayout>
 

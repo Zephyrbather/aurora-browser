@@ -513,7 +513,7 @@ object PageTranslator {
     }
 
     private fun encode(value: String): String {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8)
+        return URLEncoder.encode(value, "UTF-8")
     }
 
     private fun md5(value: String): String = digest("MD5", value)

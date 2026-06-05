@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/aurora_player_bg">
 
     <FrameLayout
         android:id="@+id/videoSurfaceContainer"
@@ -44,7 +44,7 @@
             android:contentDescription="@string/cd_close"
             android:padding="8dp"
             android:src="@drawable/ic_close"
-            android:tint="@android:color/white" />
+            app:tint="@android:color/white" />
 
         <TextView
             android:id="@+id/titleText"
@@ -60,6 +60,16 @@
             android:textStyle="bold" />
 
         <ImageButton
+            android:id="@+id/pipButton"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/cd_pip"
+            android:padding="8dp"
+            android:src="@drawable/ic_pip"
+            app:tint="@android:color/white" />
+
+        <ImageButton
             android:id="@+id/rotateButton"
             android:layout_width="40dp"
             android:layout_height="40dp"
@@ -67,7 +77,7 @@
             android:contentDescription="@string/cd_rotate_screen"
             android:padding="8dp"
             android:src="@drawable/ic_rotate"
-            android:tint="@android:color/white" />
+            app:tint="@android:color/white" />
     </LinearLayout>
 
     <LinearLayout
@@ -75,7 +85,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
-        android:background="#88000000"
+        android:background="@color/aurora_player_overlay"
         android:orientation="vertical"
         android:paddingStart="12dp"
         android:paddingTop="12dp"
@@ -92,7 +102,7 @@
                 android:id="@+id/currentTimeText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="00:00"
+                android:text="@string/time_zero"
                 android:textColor="@android:color/white"
                 android:textSize="12sp" />
 
@@ -112,7 +122,7 @@
                 android:id="@+id/durationText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="00:00"
+                android:text="@string/time_zero"
                 android:textColor="@android:color/white"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -132,7 +142,7 @@
                 android:contentDescription="@string/cd_seek_back"
                 android:padding="10dp"
                 android:src="@drawable/ic_back"
-                android:tint="@android:color/white" />
+                app:tint="@android:color/white" />
 
             <ImageButton
                 android:id="@+id/playPauseButton"
@@ -144,7 +154,7 @@
                 android:contentDescription="@string/cd_play_pause"
                 android:padding="10dp"
                 android:src="@drawable/ic_pause"
-                android:tint="@android:color/white" />
+                app:tint="@android:color/white" />
 
             <ImageButton
                 android:id="@+id/seekForwardButton"
@@ -154,7 +164,7 @@
                 android:contentDescription="@string/cd_seek_forward"
                 android:padding="10dp"
                 android:src="@drawable/ic_forward"
-                android:tint="@android:color/white" />
+                app:tint="@android:color/white" />
         </LinearLayout>
     </LinearLayout>
 

@@ -1,14 +1,21 @@
 package com.fenglan.aurorabrowser
 
+import android.app.PictureInPictureParams
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Rational
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
@@ -18,6 +25,7 @@ import com.fenglan.aurorabrowser.browser.LocalPlaylistServer
 import com.fenglan.aurorabrowser.databinding.ActivityVideoPlayerBinding
 import java.io.File
 import java.util.Locale
+import kotlin.math.abs
 
 class VideoPlayerActivity : AppCompatActivity() {
     private lateinit var binding: ActivityVideoPlayerBinding
@@ -27,6 +35,20 @@ class VideoPlayerActivity : AppCompatActivity() {
     private var seeking = false
     private var videoWidth = 0
     private var videoHeight = 0
+
+    // Gesture state
+    private var gestureStartX = 0f
+    private var gestureStartY = 0f
+    private var gestureStartPosition = 0
+    private var gestureStartBrightness = 0f
+    private var gestureStartVolume = 0
+    private var gestureInProgress = false
+    private var gestureType = GestureType.NONE
+    private lateinit var gestureDetector: GestureDetector
+    private var audioManager: AudioManager? = null
+
+    private enum class GestureType { NONE, SEEK, BRIGHTNESS, VOLUME }
+
     private val progressTicker = object : Runnable {
         override fun run() {
             updateProgressUi()
@@ -40,12 +62,27 @@ class VideoPlayerActivity : AppCompatActivity() {
         binding = ActivityVideoPlayerBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+
+        gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                val offset = if (e.x < binding.root.width / 2f) -SEEK_STEP_MS else SEEK_STEP_MS
+                seekBy(offset)
+                return true
+            }
+
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                toggleControlsVisibility()
+                return true
+            }
+        })
+
         binding.closeButton.setOnClickListener { finish() }
+        binding.pipButton.setOnClickListener { enterPip() }
         binding.rotateButton.setOnClickListener { toggleOrientation() }
         binding.playPauseButton.setOnClickListener { togglePlayback() }
         binding.seekBackButton.setOnClickListener { seekBy(-SEEK_STEP_MS) }
         binding.seekForwardButton.setOnClickListener { seekBy(SEEK_STEP_MS) }
-        binding.videoView.setOnClickListener { toggleControlsVisibility() }
         binding.topChrome.setOnClickListener { toggleControlsVisibility(show = true) }
         binding.bottomControls.setOnClickListener { toggleControlsVisibility(show = true) }
         binding.seekSlider.addOnChangeListener { _, value, fromUser ->
@@ -84,6 +121,84 @@ class VideoPlayerActivity : AppCompatActivity() {
         playFromIntent()
     }
 
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        if (gestureDetector.onTouchEvent(event)) return true
+
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                gestureStartX = event.x
+                gestureStartY = event.y
+                gestureStartPosition = binding.videoView.currentPosition
+                gestureStartBrightness = window.attributes.screenBrightness
+                gestureStartVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+                gestureInProgress = false
+                gestureType = GestureType.NONE
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - gestureStartX
+                val dy = event.y - gestureStartY
+                val viewWidth = binding.root.width
+                val viewHeight = binding.root.height
+
+                if (!gestureInProgress && (abs(dx) > 20f || abs(dy) > 20f)) {
+                    gestureInProgress = true
+                    gestureType = if (abs(dx) > abs(dy)) GestureType.SEEK
+                    else if (gestureStartX < viewWidth / 2f) GestureType.BRIGHTNESS
+                    else GestureType.VOLUME
+                    if (gestureType != GestureType.SEEK) {
+                        binding.topChrome.isVisible = false
+                        binding.bottomControls.isVisible = false
+                    }
+                }
+
+                if (!gestureInProgress) return super.dispatchTouchEvent(event)
+
+                when (gestureType) {
+                    GestureType.SEEK -> {
+                        val duration = binding.videoView.duration.takeIf { it > 0 } ?: 0
+                        if (duration > 0) {
+                            val seekMs = (dx / viewWidth * duration * 0.3f).toInt()
+                            val target = (gestureStartPosition + seekMs).coerceIn(0, duration)
+                            binding.currentTimeText.text = formatDuration(target)
+                            binding.durationText.text = formatDuration(duration)
+                            binding.seekSlider.value = target.toFloat()
+                        }
+                    }
+
+                    GestureType.BRIGHTNESS -> {
+                        val attr = window.attributes
+                        val delta = -dy / viewHeight
+                        attr.screenBrightness = (gestureStartBrightness + delta).coerceIn(0.01f, 1f)
+                        window.attributes = attr
+                    }
+
+                    GestureType.VOLUME -> {
+                        val maxVolume = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+                        val delta = (-dy / viewHeight * maxVolume).toInt()
+                        val target = (gestureStartVolume + delta).coerceIn(0, maxVolume)
+                        audioManager?.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                    }
+
+                    GestureType.NONE -> {}
+                }
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (gestureInProgress && gestureType == GestureType.SEEK) {
+                    binding.videoView.seekTo(binding.seekSlider.value.toInt())
+                    toggleControlsVisibility(show = true)
+                }
+                if (gestureType == GestureType.BRIGHTNESS || gestureType == GestureType.VOLUME) {
+                    toggleControlsVisibility(show = true)
+                }
+                gestureInProgress = false
+                gestureType = GestureType.NONE
+            }
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
     override fun onDestroy() {
         uiHandler.removeCallbacks(progressTicker)
         runCatching { binding.videoView.stopPlayback() }
@@ -107,6 +222,46 @@ class VideoPlayerActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         binding.videoSurfaceContainer.post { resizeVideoSurface() }
         updateControlsForOrientation()
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        if (isInPictureInPictureMode) {
+            binding.topChrome.isVisible = false
+            binding.bottomControls.isVisible = false
+            binding.pipButton.isVisible = false
+        } else {
+            binding.pipButton.isVisible = true
+            toggleControlsVisibility(show = true)
+        }
+    }
+
+    override fun onUserLeaveHint() {
+        if (binding.videoView.isPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(videoWidth.coerceAtLeast(1), videoHeight.coerceAtLeast(1)))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                params.setAutoEnterEnabled(true)
+                params.setSeamlessResizeEnabled(true)
+            }
+            enterPictureInPictureMode(params.build())
+        } else {
+            super.onUserLeaveHint()
+        }
+    }
+
+    private fun enterPip() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val params = PictureInPictureParams.Builder()
+                .setAspectRatio(Rational(videoWidth.coerceAtLeast(1), videoHeight.coerceAtLeast(1)))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                params.setAutoEnterEnabled(true)
+                params.setSeamlessResizeEnabled(true)
+            }
+            super.enterPictureInPictureMode(params.build())
+        } else {
+            Toast.makeText(this, "画中画需要 Android 8.0 或更高版本", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun playFromIntent() {

@@ -13,6 +13,7 @@ import com.fenglan.aurorabrowser.model.HistoryItem
 import com.fenglan.aurorabrowser.model.ResourceItem
 import com.fenglan.aurorabrowser.model.SavedCredentialItem
 import com.fenglan.aurorabrowser.model.TopSiteItem
+import com.fenglan.aurorabrowser.browser.SecureTextStore
 import java.net.URI
 
 class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
@@ -88,6 +89,17 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
             )
             """.trimIndent(),
         )
+        db.execSQL(
+            """
+            CREATE TABLE $TABLE_TABS (
+                id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 0
+            )
+            """.trimIndent(),
+        )
         createCredentialsTable(db)
         createPerformanceIndexes(db)
     }
@@ -141,6 +153,19 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
         if (oldVersion < 7) {
             createPerformanceIndexes(db)
+        }
+        if (oldVersion < 8) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS $TABLE_TABS (
+                    id INTEGER PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 0
+                )
+                """.trimIndent(),
+            )
         }
     }
 
@@ -405,6 +430,12 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         writableDatabase.delete(TABLE_BOOKMARKS, "url = ? AND is_folder = 0", arrayOf(url))
     }
 
+    fun deleteBookmarks(ids: Collection<Long>) = synchronized(this) {
+        runInTransaction {
+            ids.forEach { deleteBookmark(it) }
+        }
+    }
+
     fun getBookmarkParentId(folderId: Long): Long = synchronized(this) {
         if (folderId == ROOT_BOOKMARK_FOLDER_ID) {
             return@synchronized ROOT_BOOKMARK_FOLDER_ID
@@ -474,15 +505,32 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
     }
 
-    fun getHistory(): List<HistoryItem> = synchronized(this) {
+    fun getHistory(
+        sinceMillis: Long? = null,
+        query: String? = null,
+        limit: Int? = null,
+    ): List<HistoryItem> = synchronized(this) {
+        val selection = mutableListOf("url != ?")
+        val selectionArgs = mutableListOf(DEFAULT_HOME_URL)
+        sinceMillis?.let {
+            selection += "visited_at >= ?"
+            selectionArgs += it.toString()
+        }
+        query?.trim()?.takeIf { it.isNotBlank() }?.let {
+            selection += "(title LIKE ? OR url LIKE ?)"
+            val like = "%$it%"
+            selectionArgs += like
+            selectionArgs += like
+        }
         readableDatabase.query(
             TABLE_HISTORY,
             arrayOf("id", "title", "url", "visited_at"),
-            "url != ?",
-            arrayOf(DEFAULT_HOME_URL),
+            selection.joinToString(" AND "),
+            selectionArgs.toTypedArray(),
             null,
             null,
             "visited_at DESC",
+            limit?.coerceAtLeast(1)?.toString(),
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
@@ -503,11 +551,20 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         writableDatabase.delete(TABLE_HISTORY, "id = ?", arrayOf(id.toString()))
     }
 
+    fun deleteHistoryItems(ids: Collection<Long>) = synchronized(this) {
+        runInTransaction {
+            ids.forEach {
+                delete(TABLE_HISTORY, "id = ?", arrayOf(it.toString()))
+            }
+        }
+    }
+
     fun clearHistory() = synchronized(this) {
         writableDatabase.delete(TABLE_HISTORY, null, null)
     }
 
     fun getTopSites(limit: Int = 18): List<TopSiteItem> = synchronized(this) {
+        val scanLimit = (limit.coerceAtLeast(1) * 32).coerceAtLeast(256)
         readableDatabase.query(
             TABLE_HISTORY,
             arrayOf("title", "url", "visited_at", "visit_count"),
@@ -515,7 +572,8 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
             arrayOf(DEFAULT_HOME_URL),
             null,
             null,
-            "visited_at DESC",
+            "visit_count DESC, visited_at DESC",
+            scanLimit.toString(),
         ).use { cursor ->
             val sitesByKey = linkedMapOf<String, TopSiteAggregate>()
             while (cursor.moveToNext()) {
@@ -656,15 +714,26 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
     }
 
-    fun getResourcesForPage(pageUrl: String): List<ResourceItem> = synchronized(this) {
+    fun getResourcesForPage(
+        pageUrl: String,
+        category: FileCategory? = null,
+        limit: Int? = null,
+    ): List<ResourceItem> = synchronized(this) {
+        val selection = mutableListOf("page_url = ?")
+        val selectionArgs = mutableListOf(pageUrl)
+        category?.takeIf { it != FileCategory.ALL }?.let {
+            selection += "category = ?"
+            selectionArgs += it.value
+        }
         readableDatabase.query(
             TABLE_RESOURCES,
             null,
-            "page_url = ?",
-            arrayOf(pageUrl),
+            selection.joinToString(" AND "),
+            selectionArgs.toTypedArray(),
             null,
             null,
             "captured_at DESC",
+            limit?.coerceAtLeast(1)?.toString(),
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
@@ -720,6 +789,14 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         writableDatabase.delete(TABLE_RESOURCES, "id = ?", arrayOf(id.toString()))
     }
 
+    fun deleteResources(ids: Collection<Long>) = synchronized(this) {
+        runInTransaction {
+            ids.forEach {
+                delete(TABLE_RESOURCES, "id = ?", arrayOf(it.toString()))
+            }
+        }
+    }
+
     fun clearResources() = synchronized(this) {
         writableDatabase.delete(TABLE_RESOURCES, null, null)
     }
@@ -765,15 +842,29 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         )
     }
 
-    fun getDownloads(): List<DownloadItem> = synchronized(this) {
+    fun getDownloads(
+        category: FileCategory? = null,
+        limit: Int? = null,
+        systemOnly: Boolean = false,
+    ): List<DownloadItem> = synchronized(this) {
+        val selection = mutableListOf<String>()
+        val selectionArgs = mutableListOf<String>()
+        category?.takeIf { it != FileCategory.ALL }?.let {
+            selection += "category = ?"
+            selectionArgs += it.value
+        }
+        if (systemOnly) {
+            selection += "system_download_id IS NOT NULL"
+        }
         readableDatabase.query(
             TABLE_DOWNLOADS,
             null,
-            null,
-            null,
+            selection.takeIf { it.isNotEmpty() }?.joinToString(" AND "),
+            selectionArgs.takeIf { it.isNotEmpty() }?.toTypedArray(),
             null,
             null,
             "created_at DESC",
+            limit?.coerceAtLeast(1)?.toString(),
         ).use { cursor ->
             buildList {
                 while (cursor.moveToNext()) {
@@ -809,16 +900,21 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         fileSizeBytes: Long? = null,
         progressPercent: Int? = null,
         errorMessage: String? = null,
+        clearLocalUri: Boolean = false,
+        clearDownloadedBytes: Boolean = false,
+        clearFileSizeBytes: Boolean = false,
+        clearProgressPercent: Boolean = false,
+        clearErrorMessage: Boolean = false,
     ) = synchronized(this) {
         writableDatabase.update(
             TABLE_DOWNLOADS,
             ContentValues().apply {
                 put("status", status)
-                put("local_uri", localUri)
-                put("downloaded_bytes", downloadedBytes)
-                put("file_size_bytes", fileSizeBytes)
-                put("progress_percent", progressPercent)
-                put("error_message", errorMessage)
+                putStringIfChanged("local_uri", localUri, clearLocalUri)
+                putLongIfChanged("downloaded_bytes", downloadedBytes, clearDownloadedBytes)
+                putLongIfChanged("file_size_bytes", fileSizeBytes, clearFileSizeBytes)
+                putIntIfChanged("progress_percent", progressPercent, clearProgressPercent)
+                putStringIfChanged("error_message", errorMessage, clearErrorMessage)
             },
             "id = ?",
             arrayOf(id.toString()),
@@ -861,16 +957,21 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         fileSizeBytes: Long? = null,
         progressPercent: Int? = null,
         errorMessage: String? = null,
+        clearLocalUri: Boolean = false,
+        clearDownloadedBytes: Boolean = false,
+        clearFileSizeBytes: Boolean = false,
+        clearProgressPercent: Boolean = false,
+        clearErrorMessage: Boolean = false,
     ) = synchronized(this) {
         writableDatabase.update(
             TABLE_DOWNLOADS,
             ContentValues().apply {
                 put("status", status)
-                put("local_uri", localUri)
-                put("downloaded_bytes", downloadedBytes)
-                put("file_size_bytes", fileSizeBytes)
-                put("progress_percent", progressPercent)
-                put("error_message", errorMessage)
+                putStringIfChanged("local_uri", localUri, clearLocalUri)
+                putLongIfChanged("downloaded_bytes", downloadedBytes, clearDownloadedBytes)
+                putLongIfChanged("file_size_bytes", fileSizeBytes, clearFileSizeBytes)
+                putIntIfChanged("progress_percent", progressPercent, clearProgressPercent)
+                putStringIfChanged("error_message", errorMessage, clearErrorMessage)
             },
             "system_download_id = ?",
             arrayOf(systemDownloadId.toString()),
@@ -886,17 +987,22 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         fileSizeBytes: Long? = null,
         progressPercent: Int? = null,
         errorMessage: String? = null,
+        clearLocalUri: Boolean = false,
+        clearDownloadedBytes: Boolean = false,
+        clearFileSizeBytes: Boolean = false,
+        clearProgressPercent: Boolean = false,
+        clearErrorMessage: Boolean = false,
     ) = synchronized(this) {
         writableDatabase.update(
             TABLE_DOWNLOADS,
             ContentValues().apply {
                 put("system_download_id", systemDownloadId)
                 put("status", status)
-                put("local_uri", localUri)
-                put("downloaded_bytes", downloadedBytes)
-                put("file_size_bytes", fileSizeBytes)
-                put("progress_percent", progressPercent)
-                put("error_message", errorMessage)
+                putStringIfChanged("local_uri", localUri, clearLocalUri)
+                putLongIfChanged("downloaded_bytes", downloadedBytes, clearDownloadedBytes)
+                putLongIfChanged("file_size_bytes", fileSizeBytes, clearFileSizeBytes)
+                putIntIfChanged("progress_percent", progressPercent, clearProgressPercent)
+                putStringIfChanged("error_message", errorMessage, clearErrorMessage)
             },
             "id = ?",
             arrayOf(id.toString()),
@@ -932,7 +1038,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
                 put("host", normalizedHost)
                 put("page_url", pageUrl)
                 put("username", normalizedUsername)
-                put("password", normalizedPassword)
+                put("password", SecureTextStore.encrypt(normalizedPassword))
                 put("created_at", now)
                 put("updated_at", now)
             },
@@ -943,7 +1049,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
                 put("host", normalizedHost)
                 put("page_url", pageUrl)
                 put("username", normalizedUsername)
-                put("password", normalizedPassword)
+                put("password", SecureTextStore.encrypt(normalizedPassword))
                 put("created_at", existing?.createdAt ?: now)
                 put("updated_at", now)
             },
@@ -1003,9 +1109,70 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         writableDatabase.delete(TABLE_CREDENTIALS, "id = ?", arrayOf(id.toString()))
     }
 
+    data class TabState(
+        val id: Long,
+        val title: String,
+        val url: String,
+    )
+
+    fun saveTabs(tabStates: List<TabState>, activeTabId: Long) = synchronized(this) {
+        runInTransaction {
+            delete(TABLE_TABS, null, null)
+            tabStates.forEachIndexed { index, tab ->
+                insert(
+                    TABLE_TABS,
+                    null,
+                    ContentValues().apply {
+                        put("id", tab.id)
+                        put("title", tab.title)
+                        put("url", tab.url)
+                        put("position", index)
+                        put("is_active", if (tab.id == activeTabId) 1 else 0)
+                    },
+                )
+            }
+        }
+    }
+
+    fun loadTabs(): Pair<List<TabState>, Long> = synchronized(this) {
+        val tabs = mutableListOf<TabState>()
+        var activeId = 0L
+        readableDatabase.query(
+            TABLE_TABS,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "position ASC",
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val id = cursor.getLong(cursor.getColumnIndexOrThrow("id"))
+                val title = cursor.getString(cursor.getColumnIndexOrThrow("title"))
+                val url = cursor.getString(cursor.getColumnIndexOrThrow("url"))
+                val isActive = cursor.getInt(cursor.getColumnIndexOrThrow("is_active"))
+                tabs += TabState(id = id, title = title, url = url)
+                if (isActive == 1) activeId = id
+            }
+        }
+        if (activeId == 0L && tabs.isNotEmpty()) {
+            activeId = tabs.first().id
+        }
+        Pair(tabs, activeId)
+    }
+
     companion object {
+        @Volatile
+        private var instance: BrowserStore? = null
+
+        fun getInstance(context: Context): BrowserStore {
+            return instance ?: synchronized(this) {
+                instance ?: BrowserStore(context.applicationContext).also { instance = it }
+            }
+        }
+
         private const val DATABASE_NAME = "aurora_browser.db"
-        private const val DATABASE_VERSION = 7
+        private const val DATABASE_VERSION = 8
 
         private const val TABLE_BOOKMARKS = "bookmarks"
         private const val TABLE_HISTORY = "history"
@@ -1013,6 +1180,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         private const val TABLE_DOWNLOADS = "downloads"
         private const val TABLE_HOME_SITES = "home_sites"
         private const val TABLE_CREDENTIALS = "credentials"
+        private const val TABLE_TABS = "tabs"
         const val ROOT_BOOKMARK_FOLDER_ID = 0L
         private val IPV4_HOST_REGEX = Regex("""\d{1,3}(\.\d{1,3}){3}""")
     }
@@ -1024,6 +1192,39 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_resources_captured_at ON $TABLE_RESOURCES(captured_at DESC)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_downloads_created_at ON $TABLE_DOWNLOADS(created_at DESC)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_home_sites_created_at ON $TABLE_HOME_SITES(created_at DESC)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_bookmarks_url ON $TABLE_BOOKMARKS(url)")
+    }
+
+    private fun runInTransaction(block: SQLiteDatabase.() -> Unit) {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            database.block()
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    private fun ContentValues.putStringIfChanged(column: String, value: String?, clear: Boolean) {
+        when {
+            clear -> putNull(column)
+            value != null -> put(column, value)
+        }
+    }
+
+    private fun ContentValues.putLongIfChanged(column: String, value: Long?, clear: Boolean) {
+        when {
+            clear -> putNull(column)
+            value != null -> put(column, value)
+        }
+    }
+
+    private fun ContentValues.putIntIfChanged(column: String, value: Int?, clear: Boolean) {
+        when {
+            clear -> putNull(column)
+            value != null -> put(column, value)
+        }
     }
 
     private fun createCredentialsTable(db: SQLiteDatabase) {
@@ -1161,7 +1362,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
             host = cursor.getString(cursor.getColumnIndexOrThrow("host")),
             pageUrl = cursor.getString(cursor.getColumnIndexOrThrow("page_url")),
             username = cursor.getString(cursor.getColumnIndexOrThrow("username")),
-            password = cursor.getString(cursor.getColumnIndexOrThrow("password")),
+            password = SecureTextStore.decrypt(cursor.getString(cursor.getColumnIndexOrThrow("password"))),
             createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
             updatedAt = cursor.getLong(cursor.getColumnIndexOrThrow("updated_at")),
         )

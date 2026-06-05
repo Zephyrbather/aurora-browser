@@ -2,8 +2,11 @@ package com.fenglan.aurorabrowser
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.app.Activity
+import android.app.KeyguardManager
 import android.os.Bundle
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -16,9 +19,20 @@ import com.fenglan.aurorabrowser.ui.LibraryRenderItem
 
 class CredentialVaultActivity : AppCompatActivity() {
     private lateinit var binding: ActivityLibraryBinding
-    private val store by lazy { BrowserStore(this) }
+    private val store by lazy { BrowserStore.getInstance(this) }
     private lateinit var adapter: LibraryAdapter
     private var credentials: List<SavedCredentialItem> = emptyList()
+    private var unlocked = false
+    private var unlockRequested = false
+    private val unlockLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        unlockRequested = false
+        if (result.resultCode == Activity.RESULT_OK) {
+            unlocked = true
+            loadCredentials()
+        } else {
+            finish()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +57,28 @@ class CredentialVaultActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (unlocked) {
+            loadCredentials()
+        } else {
+            requestUnlock()
+        }
+    }
+
+    private fun requestUnlock() {
+        if (unlockRequested) {
+            return
+        }
+        val keyguard = getSystemService(KeyguardManager::class.java)
+        if (keyguard.isDeviceSecure) {
+            val intent = keyguard.createConfirmDeviceCredentialIntent("验证身份", "查看已保存账号密码")
+            if (intent != null) {
+                unlockRequested = true
+                unlockLauncher.launch(intent)
+                return
+            }
+        }
+        unlocked = true
+        Toast.makeText(this, "建议先为设备设置锁屏密码", Toast.LENGTH_LONG).show()
         loadCredentials()
     }
 
@@ -66,6 +102,10 @@ class CredentialVaultActivity : AppCompatActivity() {
     }
 
     private fun showCredentialAt(position: Int) {
+        if (!unlocked) {
+            requestUnlock()
+            return
+        }
         val item = credentials.getOrNull(position) ?: return
         MaterialAlertDialogBuilder(this)
             .setTitle(item.host)
@@ -90,6 +130,10 @@ class CredentialVaultActivity : AppCompatActivity() {
     }
 
     private fun deleteCredentialAt(position: Int) {
+        if (!unlocked) {
+            requestUnlock()
+            return
+        }
         val item = credentials.getOrNull(position) ?: return
         MaterialAlertDialogBuilder(this)
             .setTitle(item.host)

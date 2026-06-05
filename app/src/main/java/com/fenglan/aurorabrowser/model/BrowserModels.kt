@@ -1,16 +1,17 @@
 package com.fenglan.aurorabrowser.model
 
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 enum class FileCategory(val value: String, val label: String) {
     ALL("all", "全部"),
     VIDEO("video", "视频"),
     STREAM("stream", "流媒体"),
+    SUBTITLE("subtitle", "字幕"),
     AUDIO("audio", "音频"),
     IMAGE("image", "图片"),
     DOCUMENT("document", "文档"),
     ARCHIVE("archive", "压缩包"),
+    TORRENT("torrent", "种子"),
     OTHER("other", "其他"),
     ;
 
@@ -33,13 +34,39 @@ enum class SearchEngine(val key: String, val label: String, private val template
     ;
 
     fun buildSearchUrl(query: String): String {
-        val encoded = URLEncoder.encode(query, StandardCharsets.UTF_8)
+        val encoded = URLEncoder.encode(query, "UTF-8")
         return template.format(encoded)
     }
 
     companion object {
         fun fromKey(key: String?): SearchEngine {
             return entries.firstOrNull { it.key == key } ?: BING
+        }
+    }
+}
+
+enum class P2pDownloadEngine(val key: String, val label: String, val summary: String, val actionLabel: String) {
+    INTERNAL(
+        "internal",
+        "内置 libtorrent",
+        "使用 Aurora 内置 jlibtorrent 后台下载，进度显示在下载列表",
+        "内置下载",
+    ),
+    EXTERNAL(
+        "external",
+        "外部 BT 应用",
+        "交给系统中的 BT 客户端处理，不同步到 Aurora 下载列表",
+        "外部应用",
+    ),
+    ;
+
+    fun alternate(): P2pDownloadEngine {
+        return if (this == INTERNAL) EXTERNAL else INTERNAL
+    }
+
+    companion object {
+        fun fromKey(key: String?): P2pDownloadEngine {
+            return entries.firstOrNull { it.key == key } ?: INTERNAL
         }
     }
 }
@@ -64,6 +91,13 @@ enum class BrowserThemeMode(val key: String, val label: String, val isDark: Bool
     EYE_CARE("eye_care", "护眼简约", false),
     PAPER("paper", "纸感简约", false),
     GRAPHITE("graphite", "石墨简约", true),
+    TIME_BASED("time_based", "随时间变化", false),
+    AURORA("aurora", "极光渐变", true),
+    SUNSET("sunset", "日落渐变", false),
+    OCEAN("ocean", "海洋渐变", true),
+    CHERRY("cherry", "樱花渐变", false),
+    NEBULA("nebula", "星云渐变", true),
+    CUSTOM_IMAGE("custom_image", "自定义图片", false),
     ;
 
     companion object {
@@ -170,6 +204,14 @@ data class BrowserSettings(
     val showMostVisitedSites: Boolean = true,
     val themeMode: BrowserThemeMode = BrowserThemeMode.LIGHT,
     val translationEngine: TranslationEngine = TranslationEngine.MICROSOFT,
+)
+
+data class SiteSettings(
+    val host: String,
+    val desktopMode: Boolean? = null,
+    val adBlockEnabled: Boolean? = null,
+    val autoTranslate: Boolean = false,
+    val autofillEnabled: Boolean = true,
 )
 
 data class BrowserUiState(

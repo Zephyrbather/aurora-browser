@@ -7,7 +7,6 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
-import android.os.Build
 import android.provider.MediaStore
 import android.webkit.CookieManager
 import androidx.work.BackoffPolicy
@@ -20,10 +19,33 @@ import com.fenglan.aurorabrowser.VideoPlayerActivity
 import com.fenglan.aurorabrowser.data.BrowserStore
 import com.fenglan.aurorabrowser.model.DownloadItem
 import com.fenglan.aurorabrowser.model.FileCategory
+import com.fenglan.aurorabrowser.model.P2pDownloadEngine
+import android.util.Log
 import com.fenglan.aurorabrowser.model.ResourceItem
+import java.io.IOException
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Collections
+import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 object BrowserDownloads {
+    private const val TAG = "AuroraHLS"
     private val EXPORT_ACTIVE_STATUSES = setOf("已排队", "转码中", "重试中", "等待中")
+    private val cacheScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val activePlaylistCaches = Collections.synchronizedSet(mutableSetOf<String>())
+
+    data class HlsVariantOption(
+        val url: String,
+        val label: String,
+        val bandwidth: Int,
+        val resolution: String?,
+    )
 
     fun enqueue(
         context: Context,
@@ -40,9 +62,24 @@ object BrowserDownloads {
         val downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory()
         val category = ResourceTools.classify(url, mimeType)
         val isHls = url.lowercase().contains(".m3u8") || mimeType?.lowercase()?.contains("mpegurl") == true
+        val magnet = TorrentTools.extractValidMagnet(url)
         val resolvedReferer = referer?.takeIf { it.isNotBlank() } ?: pageUrl?.takeIf { it.isNotBlank() }
         val cookieHeader = resolveCookieHeader(url, resolvedReferer)
         val originHeader = resolveOriginHeader(resolvedReferer) ?: resolveOriginHeader(url)
+        if (magnet != null || TorrentTools.isTorrentUrl(url, mimeType)) {
+            return enqueueP2pDownload(
+                context = context,
+                store = store,
+                sourceUrl = magnet ?: url,
+                title = title,
+                pageUrl = pageUrl,
+                isMagnet = magnet != null,
+                referer = resolvedReferer,
+                userAgent = userAgent,
+                cookieHeader = cookieHeader,
+                engine = BrowserPreferences(context).getP2pDownloadEngine(),
+            )
+        }
         val fileName = ResourceTools.guessFileName(
             url = url,
             contentDisposition = contentDisposition,
@@ -53,6 +90,19 @@ object BrowserDownloads {
 
         return if (isHls) {
             val cleanName = ResourceTools.ensureExtension(fileName.substringBeforeLast('.', fileName), "m3u8")
+            store.upsertResource(
+                title = cleanName,
+                url = url,
+                pageUrl = pageUrl,
+                mimeType = "application/x-mpegURL",
+                referer = resolvedReferer,
+                userAgent = userAgent,
+                category = FileCategory.STREAM,
+                isStream = true,
+            )
+            val cacheFile = m3u8CacheFile(context, url)
+            val hasCache = cacheFile.exists() && cacheFile.length() > 0
+            val estimatedSize = if (hasCache) estimateHlsSize(context, url) else null
             val recordId = store.insertDownload(
                 title = cleanName,
                 sourceUrl = url,
@@ -64,7 +114,7 @@ object BrowserDownloads {
                 localUri = null,
                 status = "已排队",
                 downloadedBytes = 0L,
-                fileSizeBytes = declaredSize,
+                fileSizeBytes = estimatedSize ?: declaredSize,
                 progressPercent = 0,
                 errorMessage = null,
             )
@@ -79,6 +129,9 @@ object BrowserDownloads {
                 originHeader = originHeader,
                 mimeType = mimeType,
                 downloadSubdirectory = downloadSubdirectory,
+                cachedPlaylistPath = cacheFile.takeIf { hasCache }?.absolutePath,
+                pageUrl = pageUrl,
+                segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
             )
             "已加入流媒体下载队列"
         } else {
@@ -133,6 +186,91 @@ object BrowserDownloads {
         )
     }
 
+    fun enqueueMagnetDownload(
+        context: Context,
+        store: BrowserStore,
+        magnet: String,
+        title: String? = null,
+        pageUrl: String? = null,
+        engine: P2pDownloadEngine = BrowserPreferences(context).getP2pDownloadEngine(),
+    ): String {
+        val normalized = TorrentTools.extractValidMagnet(magnet) ?: return "无效磁力链接"
+        return enqueueP2pDownload(
+            context = context,
+            store = store,
+            sourceUrl = normalized,
+            title = title,
+            pageUrl = pageUrl,
+            isMagnet = true,
+            referer = pageUrl,
+            userAgent = null,
+            cookieHeader = null,
+            engine = engine,
+        )
+    }
+
+    fun openP2pWithExternalApp(context: Context, sourceUrl: String, mimeType: String? = null): Boolean {
+        val magnet = TorrentTools.extractValidMagnet(sourceUrl)
+        val normalized = magnet ?: sourceUrl.takeIf { TorrentTools.isTorrentUrl(it, mimeType) } ?: return false
+        val resolvedMimeType = when {
+            magnet != null -> null
+            mimeType.isNullOrBlank() -> "application/x-bittorrent"
+            else -> mimeType
+        }
+        return TorrentTools.openExternalDownloader(context, normalized, resolvedMimeType)
+    }
+
+    private fun enqueueP2pDownload(
+        context: Context,
+        store: BrowserStore,
+        sourceUrl: String,
+        title: String? = null,
+        pageUrl: String? = null,
+        isMagnet: Boolean,
+        referer: String?,
+        userAgent: String?,
+        cookieHeader: String?,
+        engine: P2pDownloadEngine,
+    ): String {
+        if (engine == P2pDownloadEngine.EXTERNAL) {
+            val opened = openP2pWithExternalApp(context, sourceUrl)
+            return if (opened) "已交给外部 BT 应用" else "未找到可处理此链接的 BT 应用"
+        }
+        val fallbackTitle = if (isMagnet) TorrentTools.titleForMagnet(sourceUrl) else null
+        val displayTitle = ResourceTools.sanitizeFileName(
+            title?.takeIf { it.isNotBlank() }
+                ?: fallbackTitle
+                ?: sourceUrl.substringAfterLast('/').substringBefore('?').ifBlank { "P2P_${System.currentTimeMillis()}" },
+        )
+        val downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory()
+        val recordId = store.insertDownload(
+            title = displayTitle,
+            sourceUrl = sourceUrl,
+            pageUrl = pageUrl,
+            mimeType = "application/x-bittorrent",
+            category = FileCategory.TORRENT,
+            downloadType = "p2p",
+            systemDownloadId = null,
+            localUri = null,
+            status = "已排队",
+            downloadedBytes = 0L,
+            fileSizeBytes = null,
+            progressPercent = 0,
+            errorMessage = if (isMagnet) "等待磁力元数据" else "等待种子解析",
+        )
+        enqueueP2pWork(
+            context = context,
+            recordId = recordId,
+            sourceUrl = sourceUrl,
+            title = displayTitle,
+            outputSubdirectory = downloadSubdirectory,
+            referer = referer,
+            userAgent = userAgent,
+            cookieHeader = cookieHeader,
+        )
+        return "已加入 P2P 下载队列"
+    }
+
     fun exportHlsToMp4(context: Context, store: BrowserStore, item: DownloadItem): String {
         val downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory()
         val localUri = item.localUri?.takeIf { it.isNotBlank() }
@@ -162,23 +300,13 @@ object BrowserDownloads {
             progressPercent = 0,
             errorMessage = "源文件: ${item.title}",
         )
-        val request = OneTimeWorkRequestBuilder<HlsExportWorker>()
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
-                    .build(),
-            )
-            .addTag(downloadWorkTag(recordId))
-            .setInputData(
-                Data.Builder()
-                    .putLong(HlsExportWorker.KEY_RECORD_ID, recordId)
-                    .putString(HlsExportWorker.KEY_SOURCE_URI, localUri)
-                    .putString(HlsExportWorker.KEY_TITLE, outputTitle)
-                    .putString(HlsExportWorker.KEY_OUTPUT_SUBDIRECTORY, downloadSubdirectory)
-                    .build(),
-            )
-            .build()
-        WorkManager.getInstance(context).enqueue(request)
+        enqueueHlsExportWork(
+            context = context,
+            recordId = recordId,
+            sourceUri = localUri,
+            title = outputTitle,
+            outputSubdirectory = downloadSubdirectory,
+        )
         return "已加入 MP4 转码队列"
     }
 
@@ -227,7 +355,7 @@ object BrowserDownloads {
 
     fun pauseDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
         return when (item.downloadType) {
-            "hls" -> {
+            "hls", "p2p" -> {
                 WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
                 store.updateDownload(
                     id = item.id,
@@ -255,6 +383,7 @@ object BrowserDownloads {
                     fileSizeBytes = item.fileSizeBytes,
                     progressPercent = item.progressPercent,
                     errorMessage = "已暂停，继续时将重新开始",
+                    clearLocalUri = true,
                 )
                 "下载已暂停"
             }
@@ -265,24 +394,39 @@ object BrowserDownloads {
 
     fun resumeDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
         return when (item.downloadType) {
-            "hls" -> {
-                val resource = resolveResourceForDownload(store, item)
-                val referer = resource?.referer ?: item.pageUrl
-                val userAgent = resource?.userAgent
-                val cookieHeader = resolveCookieHeader(item.sourceUrl, referer)
-                val originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl)
-                enqueueHlsWork(
-                    context = context,
-                    recordId = item.id,
-                    url = item.sourceUrl,
-                    title = item.title,
-                    referer = referer,
-                    userAgent = userAgent,
-                    cookieHeader = cookieHeader,
-                    originHeader = originHeader,
-                    mimeType = item.mimeType,
-                    downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
-                )
+            "hls", "p2p" -> {
+                if (item.downloadType == "hls") {
+                    val resource = resolveResourceForDownload(store, item)
+                    val referer = resource?.referer ?: item.pageUrl
+                    val userAgent = resource?.userAgent
+                    val cookieHeader = resolveCookieHeader(item.sourceUrl, referer)
+                    val originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl)
+                    enqueueHlsWork(
+                        context = context,
+                        recordId = item.id,
+                        url = item.sourceUrl,
+                        title = item.title,
+                        referer = referer,
+                        userAgent = userAgent,
+                        cookieHeader = cookieHeader,
+                        originHeader = originHeader,
+                        mimeType = item.mimeType,
+                        downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                        pageUrl = item.pageUrl,
+                        segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
+                    )
+                } else {
+                    enqueueP2pWork(
+                        context = context,
+                        recordId = item.id,
+                        sourceUrl = item.sourceUrl,
+                        title = item.title,
+                        outputSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                        referer = item.pageUrl,
+                        userAgent = null,
+                        cookieHeader = resolveCookieHeader(item.sourceUrl, item.pageUrl),
+                    )
+                }
                 store.updateDownload(
                     id = item.id,
                     status = "下载中",
@@ -322,6 +466,7 @@ object BrowserDownloads {
                     fileSizeBytes = item.fileSizeBytes,
                     progressPercent = 0,
                     errorMessage = "重新开始下载",
+                    clearLocalUri = true,
                 )
                 "已重新开始下载"
             }
@@ -330,9 +475,123 @@ object BrowserDownloads {
         }
     }
 
+    fun retryDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
+        if (!canRetry(item)) {
+            return "当前任务不支持重新下载"
+        }
+        return when (item.downloadType) {
+            "hls", "p2p" -> {
+                WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
+                if (item.downloadType == "hls") {
+                    val resource = resolveResourceForDownload(store, item)
+                    val referer = resource?.referer ?: item.pageUrl
+                    val userAgent = resource?.userAgent
+                    enqueueHlsWork(
+                        context = context,
+                        recordId = item.id,
+                        url = item.sourceUrl,
+                        title = item.title,
+                        referer = referer,
+                        userAgent = userAgent,
+                        cookieHeader = resolveCookieHeader(item.sourceUrl, referer),
+                        originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl),
+                        mimeType = item.mimeType,
+                        downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                        pageUrl = item.pageUrl,
+                        segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
+                    )
+                } else {
+                    enqueueP2pWork(
+                        context = context,
+                        recordId = item.id,
+                        sourceUrl = item.sourceUrl,
+                        title = item.title,
+                        outputSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                        referer = item.pageUrl,
+                        userAgent = null,
+                        cookieHeader = resolveCookieHeader(item.sourceUrl, item.pageUrl),
+                    )
+                }
+                store.updateDownload(
+                    id = item.id,
+                    status = "下载中",
+                    localUri = item.localUri,
+                    downloadedBytes = item.downloadedBytes ?: 0L,
+                    fileSizeBytes = item.fileSizeBytes,
+                    progressPercent = item.progressPercent ?: 0,
+                    errorMessage = "重新下载",
+                )
+                "已重新下载"
+            }
+
+            "progressive" -> {
+                val manager = context.getSystemService(DownloadManager::class.java)
+                item.systemDownloadId?.let { runCatching { manager.remove(it) } }
+                val resource = resolveResourceForDownload(store, item)
+                val referer = resource?.referer ?: item.pageUrl
+                val userAgent = resource?.userAgent
+                val systemId = enqueueSystemDownload(
+                    context = context,
+                    url = item.sourceUrl,
+                    fileName = item.title,
+                    description = item.pageUrl ?: item.sourceUrl,
+                    mimeType = item.mimeType,
+                    referer = referer,
+                    userAgent = userAgent,
+                    originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl),
+                    cookieHeader = resolveCookieHeader(item.sourceUrl, referer),
+                    subdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                )
+                store.updateDownloadRequest(
+                    id = item.id,
+                    systemDownloadId = systemId,
+                    status = "下载中",
+                    localUri = null,
+                    downloadedBytes = 0L,
+                    fileSizeBytes = item.fileSizeBytes,
+                    progressPercent = 0,
+                    errorMessage = "重新下载",
+                    clearLocalUri = true,
+                )
+                "已重新下载"
+            }
+
+            "hls_export" -> {
+                val source = store.getDownloads().firstOrNull {
+                    it.downloadType == "hls" &&
+                        it.sourceUrl == item.sourceUrl &&
+                        it.status.startsWith("已完成") &&
+                        !it.localUri.isNullOrBlank()
+                } ?: return "源 m3u8 文件不存在"
+                WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
+                enqueueHlsExportWork(
+                    context = context,
+                    recordId = item.id,
+                    sourceUri = source.localUri.orEmpty(),
+                    title = item.title,
+                    outputSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                )
+                store.updateDownload(
+                    id = item.id,
+                    status = "已排队",
+                    localUri = null,
+                    downloadedBytes = 0L,
+                    fileSizeBytes = null,
+                    progressPercent = 0,
+                    errorMessage = "重新转码",
+                    clearLocalUri = true,
+                    clearFileSizeBytes = true,
+                )
+                "已重新转码"
+            }
+
+            else -> "当前任务不支持重新下载"
+        }
+    }
+
     fun cancelDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
         when (item.downloadType) {
-            "hls", "hls_export" -> {
+            "hls", "hls_export", "p2p" -> {
                 WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
                 if (!item.localUri.isNullOrBlank()) {
                     deleteLocalFile(context, item)
@@ -345,6 +604,7 @@ object BrowserDownloads {
                     fileSizeBytes = item.fileSizeBytes,
                     progressPercent = 0,
                     errorMessage = "已取消",
+                    clearLocalUri = true,
                 )
             }
 
@@ -362,6 +622,7 @@ object BrowserDownloads {
                     fileSizeBytes = item.fileSizeBytes,
                     progressPercent = 0,
                     errorMessage = "已取消",
+                    clearLocalUri = true,
                 )
             }
         }
@@ -372,7 +633,7 @@ object BrowserDownloads {
         val manager = context.getSystemService(DownloadManager::class.java)
         val isCompleted = item.status.startsWith("已完成")
 
-        if ((item.downloadType == "hls" || item.downloadType == "hls_export") && !isCompleted) {
+        if ((item.downloadType == "hls" || item.downloadType == "hls_export" || item.downloadType == "p2p") && !isCompleted) {
             WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
         }
 
@@ -401,7 +662,7 @@ object BrowserDownloads {
 
     fun refreshSystemDownloads(context: Context, store: BrowserStore) {
         val manager = context.getSystemService(DownloadManager::class.java)
-        val tracked = store.getDownloads().filter { it.systemDownloadId != null }
+        val tracked = store.getDownloads(systemOnly = true)
         tracked.forEach { item ->
             val systemId = item.systemDownloadId ?: return@forEach
             val cursor = manager.query(DownloadManager.Query().setFilterById(systemId))
@@ -422,7 +683,16 @@ object BrowserDownloads {
                     ?: readStringOrNull(it, DownloadManager.COLUMN_LOCAL_URI)
                 when (statusCode) {
                     DownloadManager.STATUS_SUCCESSFUL -> {
-                        store.updateDownloadBySystemId(systemId, "已完成", uri, bytes, bytes, 100, null)
+                        store.updateDownloadBySystemId(
+                            systemId,
+                            "已完成",
+                            uri,
+                            bytes,
+                            bytes,
+                            100,
+                            null,
+                            clearErrorMessage = true,
+                        )
                     }
 
                     DownloadManager.STATUS_FAILED -> {
@@ -434,11 +704,29 @@ object BrowserDownloads {
                     }
 
                     DownloadManager.STATUS_PENDING -> {
-                        store.updateDownloadBySystemId(systemId, "等待中", uri, downloadedBytes, bytes, progress, null)
+                        store.updateDownloadBySystemId(
+                            systemId,
+                            "等待中",
+                            uri,
+                            downloadedBytes,
+                            bytes,
+                            progress,
+                            null,
+                            clearErrorMessage = true,
+                        )
                     }
 
                     DownloadManager.STATUS_RUNNING -> {
-                        store.updateDownloadBySystemId(systemId, "下载中", uri, downloadedBytes, bytes, progress, null)
+                        store.updateDownloadBySystemId(
+                            systemId,
+                            "下载中",
+                            uri,
+                            downloadedBytes,
+                            bytes,
+                            progress,
+                            null,
+                            clearErrorMessage = true,
+                        )
                     }
                 }
             }
@@ -476,7 +764,9 @@ object BrowserDownloads {
             FileCategory.VIDEO, FileCategory.STREAM -> "video/*"
             FileCategory.AUDIO -> "audio/*"
             FileCategory.IMAGE -> "image/*"
+            FileCategory.SUBTITLE -> "text/*"
             FileCategory.DOCUMENT -> "application/*"
+            FileCategory.TORRENT -> "application/x-bittorrent"
             FileCategory.ARCHIVE, FileCategory.OTHER, FileCategory.ALL -> "*/*"
         }
     }
@@ -488,6 +778,10 @@ object BrowserDownloads {
 
     fun canResume(item: DownloadItem): Boolean {
         return item.downloadType != "hls_export" && item.status == "已暂停"
+    }
+
+    fun canRetry(item: DownloadItem): Boolean {
+        return item.status == "失败" && item.downloadType in setOf("hls", "progressive", "hls_export", "p2p")
     }
 
     fun canCancel(item: DownloadItem): Boolean {
@@ -515,6 +809,12 @@ object BrowserDownloads {
         val uri = Uri.parse(value)
         if (item.downloadType == "hls") {
             return HlsPackageTools.deletePackageForUri(item.localUri)
+        }
+        if (item.downloadType == "p2p") {
+            return when (uri.scheme?.lowercase()) {
+                "file" -> runCatching { File(requireNotNull(uri.path)).deleteRecursively() }.getOrDefault(false)
+                else -> false
+            }
         }
         val deletedBySystem = if (item.systemDownloadId != null) {
             val manager = context.getSystemService(DownloadManager::class.java)
@@ -544,8 +844,77 @@ object BrowserDownloads {
         originHeader: String?,
         mimeType: String?,
         downloadSubdirectory: String,
+        cachedPlaylistPath: String? = null,
+        pageUrl: String? = null,
+        segmentConcurrency: Int = 4,
     ) {
+        val data = Data.Builder()
+            .putLong(HlsDownloadWorker.KEY_RECORD_ID, recordId)
+            .putString(HlsDownloadWorker.KEY_URL, url)
+            .putString(HlsDownloadWorker.KEY_TITLE, title)
+            .putString(HlsDownloadWorker.KEY_REFERER, referer)
+            .putString(HlsDownloadWorker.KEY_USER_AGENT, userAgent)
+            .putString(HlsDownloadWorker.KEY_COOKIE, cookieHeader)
+            .putString(HlsDownloadWorker.KEY_ORIGIN, originHeader)
+            .putString(HlsDownloadWorker.KEY_MIME_TYPE, mimeType)
+            .putString(HlsDownloadWorker.KEY_OUTPUT_SUBDIRECTORY, downloadSubdirectory)
+            .putInt(HlsDownloadWorker.KEY_SEGMENT_CONCURRENCY, segmentConcurrency.coerceIn(1, 8))
+        if (!cachedPlaylistPath.isNullOrBlank()) {
+            data.putString(HlsDownloadWorker.KEY_CACHED_PLAYLIST, cachedPlaylistPath)
+        }
+        if (!pageUrl.isNullOrBlank()) {
+            data.putString(HlsDownloadWorker.KEY_PAGE_URL, pageUrl)
+        }
         val request = OneTimeWorkRequestBuilder<HlsDownloadWorker>()
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build(),
+            )
+            .addTag(downloadWorkTag(recordId))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, java.time.Duration.ofSeconds(10))
+            .setInputData(data.build())
+            .build()
+        WorkManager.getInstance(context).enqueue(request)
+    }
+
+    private fun enqueueHlsExportWork(
+        context: Context,
+        recordId: Long,
+        sourceUri: String,
+        title: String,
+        outputSubdirectory: String,
+    ) {
+        val request = OneTimeWorkRequestBuilder<HlsExportWorker>()
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.NOT_REQUIRED)
+                    .build(),
+            )
+            .addTag(downloadWorkTag(recordId))
+            .setInputData(
+                Data.Builder()
+                    .putLong(HlsExportWorker.KEY_RECORD_ID, recordId)
+                    .putString(HlsExportWorker.KEY_SOURCE_URI, sourceUri)
+                    .putString(HlsExportWorker.KEY_TITLE, title)
+                    .putString(HlsExportWorker.KEY_OUTPUT_SUBDIRECTORY, outputSubdirectory)
+                    .build(),
+            )
+            .build()
+        WorkManager.getInstance(context).enqueue(request)
+    }
+
+    private fun enqueueP2pWork(
+        context: Context,
+        recordId: Long,
+        sourceUrl: String,
+        title: String,
+        outputSubdirectory: String,
+        referer: String? = null,
+        userAgent: String? = null,
+        cookieHeader: String? = null,
+    ) {
+        val request = OneTimeWorkRequestBuilder<P2pDownloadWorker>()
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -555,15 +924,13 @@ object BrowserDownloads {
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, java.time.Duration.ofSeconds(10))
             .setInputData(
                 Data.Builder()
-                    .putLong(HlsDownloadWorker.KEY_RECORD_ID, recordId)
-                    .putString(HlsDownloadWorker.KEY_URL, url)
-                    .putString(HlsDownloadWorker.KEY_TITLE, title)
-                    .putString(HlsDownloadWorker.KEY_REFERER, referer)
-                    .putString(HlsDownloadWorker.KEY_USER_AGENT, userAgent)
-                    .putString(HlsDownloadWorker.KEY_COOKIE, cookieHeader)
-                    .putString(HlsDownloadWorker.KEY_ORIGIN, originHeader)
-                    .putString(HlsDownloadWorker.KEY_MIME_TYPE, mimeType)
-                    .putString(HlsDownloadWorker.KEY_OUTPUT_SUBDIRECTORY, downloadSubdirectory)
+                    .putLong(P2pDownloadWorker.KEY_RECORD_ID, recordId)
+                    .putString(P2pDownloadWorker.KEY_SOURCE_URL, sourceUrl)
+                    .putString(P2pDownloadWorker.KEY_TITLE, title)
+                    .putString(P2pDownloadWorker.KEY_OUTPUT_SUBDIRECTORY, outputSubdirectory)
+                    .putString(P2pDownloadWorker.KEY_REFERER, referer)
+                    .putString(P2pDownloadWorker.KEY_USER_AGENT, userAgent)
+                    .putString(P2pDownloadWorker.KEY_COOKIE, cookieHeader)
                     .build(),
             )
             .build()
@@ -609,27 +976,199 @@ object BrowserDownloads {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, fileName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$subdirectory")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$subdirectory")
+            put(MediaStore.Downloads.IS_PENDING, 1)
         }
         return context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
     }
 
     private fun finalizePendingDownload(context: Context, uri: Uri) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.IS_PENDING, 0)
-            }
-            context.contentResolver.update(uri, values, null, null)
-        }
+        context.contentResolver.update(uri, ContentValues().apply {
+            put(MediaStore.Downloads.IS_PENDING, 0)
+        }, null, null)
     }
 
     private fun downloadWorkTag(recordId: Long): String = "aurora_download_$recordId"
 
     private fun resolveResourceForDownload(store: BrowserStore, item: DownloadItem): ResourceItem? {
         return store.getResourceByUrl(item.sourceUrl)
+    }
+
+    fun cacheM3u8Playlist(
+        context: Context,
+        url: String,
+        referer: String?,
+        userAgent: String?,
+    ) {
+        val cookie = CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
+        val origin = resolveOriginHeader(referer) ?: resolveOriginHeader(url)
+        val cacheFile = m3u8CacheFile(context, url)
+        if (cacheFile.exists() && cacheFile.length() > 0) {
+            Log.d(TAG, "cacheM3u8Playlist SKIP already cached size=${cacheFile.length()} url=${url.take(100)}")
+            return
+        }
+        if (!activePlaylistCaches.add(url)) {
+            return
+        }
+        Log.d(TAG, "cacheM3u8Playlist START url=${url.take(120)}")
+        cacheScope.launch {
+            runCatching {
+                val connection = URL(url).openConnection() as HttpURLConnection
+                try {
+                    connection.instanceFollowRedirects = true
+                    connection.connectTimeout = 8000
+                    connection.readTimeout = 10000
+                    val ua = userAgent?.takeIf { it.isNotBlank() }
+                        ?: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                    connection.setRequestProperty("User-Agent", ua)
+                    referer?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Referer", it) }
+                    cookie?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Cookie", it) }
+                    origin?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Origin", it) }
+                    connection.setRequestProperty("Accept", "*/*")
+                    connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag())
+                    connection.setRequestProperty("Sec-Fetch-Dest", "empty")
+                    connection.setRequestProperty("Sec-Fetch-Mode", "cors")
+                    connection.setRequestProperty("Sec-Fetch-Site", "cross-site")
+                    connection.connect()
+                    val code = connection.responseCode
+                    Log.d(TAG, "cacheM3u8Playlist HTTP $code url=${url.take(100)}")
+                    if (code in 200..299) {
+                        cacheFile.parentFile?.mkdirs()
+                        val tmpFile = File(cacheFile.parentFile, "${cacheFile.name}.part")
+                        try {
+                            connection.inputStream.use { input ->
+                                FileOutputStream(tmpFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            if (!tmpFile.renameTo(cacheFile)) {
+                                tmpFile.copyTo(cacheFile, overwrite = true)
+                                tmpFile.delete()
+                            }
+                        } finally {
+                            if (tmpFile.exists()) {
+                                tmpFile.delete()
+                            }
+                        }
+                        Log.d(TAG, "cacheM3u8Playlist OK size=${cacheFile.length()}")
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            }.onFailure {
+                Log.e(TAG, "cacheM3u8Playlist FAIL ${it.message} url=${url.take(100)}")
+            }.also {
+                activePlaylistCaches.remove(url)
+            }
+        }
+    }
+
+    fun m3u8CacheFile(context: Context, url: String): File {
+        return File(File(context.cacheDir, "hls_playlists"), "m3u8_${url.hashCode()}.tmp")
+    }
+
+    fun estimateHlsSize(context: Context, url: String): Long? {
+        val cacheFile = m3u8CacheFile(context, url)
+        if (!cacheFile.exists() || cacheFile.length() <= 0) return null
+        return runCatching {
+            val text = cacheFile.readText()
+            var totalDuration = 0.0
+            var bandwidth = 3_000_000L
+            var targetDuration = 10
+            text.lineSequence().forEach { line ->
+                when {
+                    line.startsWith("#EXT-X-TARGETDURATION:") ->
+                        targetDuration = line.substringAfter(':').trim().toIntOrNull() ?: 10
+                    line.startsWith("#EXTINF:") -> {
+                        val dur = line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull()
+                        if (dur != null && dur > 0) totalDuration += dur
+                    }
+                }
+            }
+            if (totalDuration > 0) {
+                (totalDuration * bandwidth / 8).toLong().coerceAtLeast(1024 * 1024)
+            } else {
+                val segCount = text.lineSequence().count { !it.startsWith("#") && it.isNotBlank() }
+                if (segCount > 0) (segCount.toLong() * targetDuration * bandwidth / 8) else null
+            }
+        }.getOrNull()
+    }
+
+    fun loadHlsVariants(
+        context: Context,
+        url: String,
+        referer: String?,
+        userAgent: String?,
+    ): List<HlsVariantOption> {
+        val cacheText = m3u8CacheFile(context, url)
+            .takeIf { it.exists() && it.length() > 0 }
+            ?.readText()
+        val playlistText = cacheText ?: fetchPlaylistText(url, referer, userAgent)
+        return parseHlsVariants(url, playlistText)
+    }
+
+    private fun parseHlsVariants(masterUrl: String, text: String): List<HlsVariantOption> {
+        if (!text.contains("#EXT-X-STREAM-INF")) {
+            return emptyList()
+        }
+        val lines = text.lines()
+        return buildList {
+            for (index in lines.indices) {
+                val line = lines[index].trim()
+                if (!line.startsWith("#EXT-X-STREAM-INF:")) {
+                    continue
+                }
+                val attrs = parseAttributes(line.substringAfter(':'))
+                val nextLine = lines.getOrNull(index + 1)?.trim().orEmpty()
+                if (nextLine.isBlank() || nextLine.startsWith("#")) {
+                    continue
+                }
+                val bandwidth = attrs["BANDWIDTH"]?.toIntOrNull() ?: 0
+                val resolution = attrs["RESOLUTION"]
+                val quality = resolution?.substringAfter('x')?.takeIf { it.isNotBlank() }?.let { "${it}p" }
+                val mbps = if (bandwidth > 0) String.format(Locale.US, "%.1f Mbps", bandwidth / 1_000_000.0) else "码率未知"
+                add(
+                    HlsVariantOption(
+                        url = URL(URL(masterUrl), nextLine).toString(),
+                        label = listOfNotNull(quality, resolution, mbps).joinToString(" · "),
+                        bandwidth = bandwidth,
+                        resolution = resolution,
+                    ),
+                )
+            }
+        }.distinctBy { it.url }.sortedByDescending { it.bandwidth }
+    }
+
+    private fun fetchPlaylistText(url: String, referer: String?, userAgent: String?): String {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        try {
+            connection.instanceFollowRedirects = true
+            connection.connectTimeout = 8000
+            connection.readTimeout = 10000
+            connection.setRequestProperty(
+                "User-Agent",
+                userAgent?.takeIf { it.isNotBlank() }
+                    ?: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            )
+            referer?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Referer", it) }
+            resolveCookieHeader(url, referer)?.let { connection.setRequestProperty("Cookie", it) }
+            connection.setRequestProperty("Accept", "*/*")
+            connection.connect()
+            if (connection.responseCode !in 200..299) {
+                throw IOException("playlist http ${connection.responseCode}")
+            }
+            return connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun parseAttributes(raw: String): Map<String, String> {
+        val result = linkedMapOf<String, String>()
+        Regex("""([A-Z0-9-]+)=("[^"]*"|[^,]*)""").findAll(raw).forEach { match ->
+            result[match.groupValues[1]] = match.groupValues[2].trim().removeSurrounding("\"")
+        }
+        return result
     }
 
     private fun resolveCookieHeader(url: String, referer: String?): String? {

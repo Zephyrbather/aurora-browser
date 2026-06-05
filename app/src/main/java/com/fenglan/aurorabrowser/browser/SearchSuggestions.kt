@@ -6,7 +6,6 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 
 object SearchSuggestions {
     fun fetch(engine: SearchEngine, query: String): List<String> {
@@ -84,6 +83,6 @@ object SearchSuggestions {
     }
 
     private fun encode(query: String): String {
-        return URLEncoder.encode(query, StandardCharsets.UTF_8)
+        return URLEncoder.encode(query, "UTF-8")
     }
 }

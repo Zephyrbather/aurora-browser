@@ -9,4 +9,7 @@
     <color name="aurora_night_text">#E5E7EB</color>
     <color name="aurora_night_text_muted">#9CA3AF</color>
     <color name="aurora_accent">#0F766E</color>
+    <color name="aurora_scrim">#AAFFFFFF</color>
+    <color name="aurora_player_bg">#FF000000</color>
+    <color name="aurora_player_overlay">#88000000</color>
 </resources>

@@ -1,6 +1,7 @@
 package com.fenglan.aurorabrowser.browser
 
 import android.net.Uri
+import android.os.SystemClock
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.fenglan.aurorabrowser.data.BrowserStore
@@ -13,7 +14,7 @@ class HlsExportWorker(
     appContext: android.content.Context,
     workerParams: WorkerParameters,
 ) : CoroutineWorker(appContext, workerParams) {
-    private val store = BrowserStore(appContext)
+    private val store = BrowserStore.getInstance(appContext)
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val recordId = inputData.getLong(KEY_RECORD_ID, -1L)
@@ -33,20 +34,32 @@ class HlsExportWorker(
 
         try {
             store.updateDownload(recordId, "转码中", progressPercent = 0, errorMessage = "准备转码")
+            var lastProgressStage = ""
+            var lastProgressPercent = -1
+            var lastProgressUpdateAt = 0L
             val converted = HlsPackageTools.convertPackageToMp4(
                 context = applicationContext,
                 playlistFile = playlistFile,
                 outputName = ResourceTools.ensureExtension(title.substringBeforeLast('.', title), "mp4"),
                 downloadSubdirectory = outputSubdirectory,
                 onProgress = { stage, processedBytes, totalBytes, progressPercent ->
-                    store.updateDownload(
-                        id = recordId,
-                        status = "转码中",
-                        downloadedBytes = processedBytes,
-                        fileSizeBytes = totalBytes,
-                        progressPercent = progressPercent,
-                        errorMessage = stage,
-                    )
+                    val now = SystemClock.elapsedRealtime()
+                    val stageChanged = stage != lastProgressStage
+                    val percentChangedEnough = progressPercent - lastProgressPercent >= 2
+                    val timeElapsedEnough = now - lastProgressUpdateAt >= 700L
+                    if (progressPercent >= 100 || stageChanged || percentChangedEnough || timeElapsedEnough) {
+                        lastProgressStage = stage
+                        lastProgressPercent = progressPercent
+                        lastProgressUpdateAt = now
+                        store.updateDownload(
+                            id = recordId,
+                            status = "转码中",
+                            downloadedBytes = processedBytes,
+                            fileSizeBytes = totalBytes,
+                            progressPercent = progressPercent,
+                            errorMessage = stage,
+                        )
+                    }
                 },
             )
             store.updateDownloadResult(
@@ -60,6 +73,13 @@ class HlsExportWorker(
                 progressPercent = 100,
                 errorMessage = "由 m3u8 转为 MP4",
             )
+            HlsPackageTools.deletePackageForUri(sourceUri)
+            val originalRecord = store.getDownloads().firstOrNull {
+                it.sourceUrl == sourceUri && it.downloadType == "hls"
+            }
+            if (originalRecord != null) {
+                store.deleteDownload(originalRecord.id)
+            }
             Result.success()
         } catch (error: Throwable) {
             if (store.getDownloadStatus(recordId) == "已取消") {

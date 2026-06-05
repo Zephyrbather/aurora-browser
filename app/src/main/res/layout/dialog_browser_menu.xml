@@ -9,17 +9,18 @@
     android:paddingBottom="20dp">
 
     <View
+        android:id="@+id/menuDragHandle"
         android:layout_width="44dp"
         android:layout_height="4dp"
         android:layout_gravity="center_horizontal"
-        android:background="@android:color/darker_gray" />
+        android:background="@color/aurora_line" />
 
     <TextView
         android:id="@+id/menuTitleText"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"
-        android:text="浏览器菜单"
+        android:text="@string/menu_title"
         android:textSize="16sp"
         android:textStyle="bold" />
 
@@ -28,7 +29,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="左右滑动查看更多"
+        android:text="@string/menu_swipe_hint"
         android:textSize="12sp" />
 
     <HorizontalScrollView

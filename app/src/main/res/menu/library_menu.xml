@@ -1,27 +1,40 @@
 <?xml version="1.0" encoding="utf-8"?>
-<menu xmlns:android="http://schemas.android.com/apk/res/android">
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
         android:id="@+id/action_refresh"
         android:title="刷新列表"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_create_folder"
         android:title="新建文件夹"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_clear"
         android:title="清空"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_export"
+        android:title="导出 HTML"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_multi_select"
         android:title="多选"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_select_all"
         android:title="全选"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_batch_actions"
         android:title="批量操作"
-        android:showAsAction="never" />
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_cleanup_missing"
+        android:title="清理已删除的文件记录"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_import_bookmarks"
+        android:title="@string/cd_import_bookmarks"
+        app:showAsAction="never" />
 </menu>

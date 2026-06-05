@@ -3,16 +3,19 @@ package com.fenglan.aurorabrowser.browser
 import android.content.ContentValues
 import android.content.Context
 import android.media.MediaCodec
+import android.media.MediaDataSource
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.net.Uri
-import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
+import android.webkit.CookieManager
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.ByteBuffer
@@ -21,8 +24,15 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.math.ceil
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 object HlsPackageTools {
+    private const val TAG = "AuroraHLS"
+
     data class RequestHeaders(
         val referer: String?,
         val userAgent: String?,
@@ -67,17 +77,31 @@ object HlsPackageTools {
         val iv: ByteArray?,
     )
 
-    fun downloadPackage(
+    suspend fun downloadPackage(
         context: Context,
         recordId: Long,
         title: String,
         playlistUrl: String,
         headers: RequestHeaders,
         downloadSubdirectory: String = "Aurora",
+        cachedPlaylistFile: File? = null,
+        segmentConcurrency: Int = DEFAULT_SEGMENT_CONCURRENCY,
         shouldContinue: (() -> Boolean)? = null,
         onProgress: ((playlistFile: File, downloadedBytes: Long, done: Int, total: Int) -> Unit)? = null,
     ): DownloadedPackage {
-        val playlist = resolvePlaylist(playlistUrl, headers)
+        Log.d(TAG, "downloadPackage url=$playlistUrl cachedPlaylistFile=${cachedPlaylistFile?.absolutePath} exists=${cachedPlaylistFile?.exists()} size=${cachedPlaylistFile?.length()}")
+        val playlist = try {
+            Log.d(TAG, "Fetching fresh playlist from server")
+            resolvePlaylist(playlistUrl, headers)
+        } catch (freshError: Throwable) {
+            Log.w(TAG, "Fresh playlist fetch failed: ${freshError.message}, trying cache")
+            if (cachedPlaylistFile != null && cachedPlaylistFile.exists() && cachedPlaylistFile.length() > 0) {
+                Log.d(TAG, "Falling back to cached playlist")
+                parsePlaylist(playlistUrl, cachedPlaylistFile.readText(), headers)
+            } else {
+                throw freshError
+            }
+        }
         val rootDir = File(
             context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir,
             "$downloadSubdirectory/hls/${ResourceTools.sanitizeFileName(title).substringBeforeLast('.')}_${recordId}",
@@ -93,32 +117,24 @@ object HlsPackageTools {
             }
             val target = File(rootDir, init.localName)
             if (!target.exists() || target.length() <= 0L) {
-                val bytes = downloadBytes(init.url, headers)
-                target.outputStream().use { it.write(bytes) }
+                downloadFile(init.url, headers, target)
             }
             totalBytes += target.length()
         }
 
-        playlist.segments.forEachIndexed { index, segment ->
-            if (shouldContinue?.invoke() == false) {
-                throw IOException("任务已停止")
-            }
-            val target = File(rootDir, segment.localName)
-            if (!target.exists() || target.length() <= 0L) {
-                val encrypted = downloadBytes(segment.url, headers)
-                val bytes = segment.encryption?.let { encryption ->
-                    val keyBytes = downloadBytes(encryption.keyUrl, headers)
-                    decryptSegment(encrypted, keyBytes, encryption.iv ?: ivForSequence(segment.sequence))
-                } ?: encrypted
-                target.outputStream().use { it.write(bytes) }
-            }
-            totalBytes += target.length()
-            writeLocalPlaylist(
+        if (playlist.segments.isNotEmpty()) {
+            downloadSegmentsParallel(
+                playlist = playlist,
+                rootDir = rootDir,
                 playlistFile = playlistFile,
-                playlist = playlist.copy(segments = playlist.segments.take(index + 1)),
-                appendEndList = false,
+                headers = headers,
+                concurrency = segmentConcurrency,
+                shouldContinue = shouldContinue,
+                onProgress = { done, bytes ->
+                    totalBytes = bytes
+                    onProgress?.invoke(playlistFile, totalBytes, done, playlist.segments.size)
+                },
             )
-            onProgress?.invoke(playlistFile, totalBytes, index + 1, playlist.segments.size)
         }
 
         writeLocalPlaylist(
@@ -144,32 +160,42 @@ object HlsPackageTools {
         onProgress: ((stage: String, processedBytes: Long, totalBytes: Long, progressPercent: Int) -> Unit)? = null,
     ): ConvertedFile {
         val localPackage = parseLocalPlaylist(playlistFile)
-        val sourceExtension = if (localPackage.isFragmentedMp4) "mp4" else "ts"
-        val sourceFile = File(context.cacheDir, "aurora_hls_export_${System.currentTimeMillis()}.$sourceExtension")
         val totalSourceBytes = packageSourceBytes(localPackage).coerceAtLeast(1L)
+        var outputUri = createOutputUri(context, outputName, "video/mp4", downloadSubdirectory)
         try {
-            onProgress?.invoke("合并分片", 0L, totalSourceBytes, 0)
-            writeLocalPackageSource(localPackage, sourceFile) { processed, total ->
-                val progress = ((processed * 45f) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 45)
-                onProgress?.invoke("合并分片", processed, total, progress)
-            }
-            val outputUri = createOutputUri(context, outputName, "video/mp4", downloadSubdirectory)
             try {
-                onProgress?.invoke("封装 MP4", 0L, totalSourceBytes, 46)
-                remuxToMp4(context, sourceFile, outputUri) { processed, total ->
-                    val progress = 45 + ((processed * 55f) / total.coerceAtLeast(1L)).toInt()
-                    onProgress?.invoke("封装 MP4", processed, total, progress.coerceIn(45, 99))
+                onProgress?.invoke("快速封装 MP4", 0L, totalSourceBytes, 1)
+                remuxLocalPackageToMp4(context, localPackage, totalSourceBytes, outputUri) { processed, total ->
+                    val progress = ((processed * 98f) / total.coerceAtLeast(1L)).toInt() + 1
+                    onProgress?.invoke("快速封装 MP4", processed, total, progress.coerceIn(1, 99))
                 }
-                finalizePending(context, outputUri)
-            } catch (error: Throwable) {
+            } catch (_: Throwable) {
                 deleteOutputUri(context, outputUri)
-                throw error
+                outputUri = createOutputUri(context, outputName, "video/mp4", downloadSubdirectory)
+                val sourceExtension = if (localPackage.isFragmentedMp4) "mp4" else "ts"
+                val sourceFile = File(context.cacheDir, "aurora_hls_export_${System.currentTimeMillis()}.$sourceExtension")
+                try {
+                    onProgress?.invoke("兼容合并分片", 0L, totalSourceBytes, 0)
+                    writeLocalPackageSource(localPackage, sourceFile) { processed, total ->
+                        val progress = ((processed * 35f) / total.coerceAtLeast(1L)).toInt().coerceIn(0, 35)
+                        onProgress?.invoke("兼容合并分片", processed, total, progress)
+                    }
+                    onProgress?.invoke("兼容封装 MP4", 0L, totalSourceBytes, 36)
+                    remuxToMp4(context, sourceFile, outputUri) { processed, total ->
+                        val progress = 35 + ((processed * 64f) / total.coerceAtLeast(1L)).toInt()
+                        onProgress?.invoke("兼容封装 MP4", processed, total, progress.coerceIn(36, 99))
+                    }
+                } finally {
+                    sourceFile.delete()
+                }
             }
+            finalizePending(context, outputUri)
             val size = context.contentResolver.openFileDescriptor(outputUri, "r")?.use { it.statSize }
             onProgress?.invoke("转码完成", totalSourceBytes, totalSourceBytes, 100)
             return ConvertedFile(uri = outputUri, sizeBytes = size)
-        } finally {
-            sourceFile.delete()
+        } catch (error: Throwable) {
+            deleteOutputUri(context, outputUri)
+            throw error
         }
     }
 
@@ -185,11 +211,18 @@ object HlsPackageTools {
 
     private fun resolvePlaylist(url: String, headers: RequestHeaders): MediaPlaylist {
         val text = downloadText(url, headers)
+        return parsePlaylist(url, text, headers)
+    }
+
+    private fun parsePlaylist(baseUrl: String, text: String, headers: RequestHeaders): MediaPlaylist {
         if (text.contains("#EXT-X-STREAM-INF")) {
-            val bestVariantUrl = chooseBestVariant(url, text)
+            val bestVariantUrl = chooseBestVariant(baseUrl, text)
             return resolvePlaylist(bestVariantUrl, headers)
         }
+        return parseMediaPlaylist(baseUrl, text)
+    }
 
+    private fun parseMediaPlaylist(baseUrl: String, text: String): MediaPlaylist {
         var currentSequence = 0L
         var currentEncryption: EncryptionInfo? = null
         var currentDuration = 0.0
@@ -202,28 +235,22 @@ object HlsPackageTools {
                 line.startsWith("#EXT-X-MEDIA-SEQUENCE:") -> {
                     currentSequence = line.substringAfter(':').trim().toLongOrNull() ?: 0L
                 }
-
                 line.startsWith("#EXT-X-KEY:") -> {
                     val attrs = parseAttributes(line.substringAfter(':'))
                     currentEncryption = when (attrs["METHOD"]?.uppercase(Locale.US)) {
-                        "AES-128" -> {
-                            EncryptionInfo(
-                                keyUrl = resolveUrl(url, attrs["URI"].orEmpty()),
-                                iv = attrs["IV"]?.removePrefix("0x")?.let(::hexToBytes),
-                            )
-                        }
-
+                        "AES-128" -> EncryptionInfo(
+                            keyUrl = resolveUrl(baseUrl, attrs["URI"].orEmpty()),
+                            iv = attrs["IV"]?.removePrefix("0x")?.let(::hexToBytes),
+                        )
                         else -> null
                     }
                 }
-
                 line.startsWith("#EXTINF:") -> {
                     currentDuration = line.substringAfter(':').substringBefore(',').trim().toDoubleOrNull() ?: 0.0
                 }
-
                 line.startsWith("#EXT-X-MAP:") -> {
                     val attrs = parseAttributes(line.substringAfter(':'))
-                    val initUrl = attrs["URI"]?.let { resolveUrl(url, it) }
+                    val initUrl = attrs["URI"]?.let { resolveUrl(baseUrl, it) }
                     if (!initUrl.isNullOrBlank()) {
                         val ext = extensionForUrl(initUrl).ifBlank { "mp4" }
                         initializationSegment = InitializationSegment(
@@ -232,11 +259,9 @@ object HlsPackageTools {
                         )
                     }
                 }
-
                 line.isBlank() || line.startsWith("#") -> Unit
-
                 else -> {
-                    val resolvedUrl = resolveUrl(url, line)
+                    val resolvedUrl = resolveUrl(baseUrl, line)
                     val extension = extensionForUrl(resolvedUrl).ifBlank { "ts" }
                     segments += MediaSegment(
                         url = resolvedUrl,
@@ -254,7 +279,6 @@ object HlsPackageTools {
         if (segments.isEmpty()) {
             throw IOException("未解析到流媒体分片")
         }
-
         val isFragmentedMp4 = initializationSegment != null || segments.first().localName.endsWith(".m4s")
         val targetDuration = ceil(segments.maxOf { it.durationSeconds }).toInt().coerceAtLeast(1)
         return MediaPlaylist(
@@ -295,7 +319,7 @@ object HlsPackageTools {
         var currentDuration = 0.0
         val segments = mutableListOf<MediaSegment>()
 
-        lines.forEachIndexed { index, rawLine ->
+        lines.forEach { rawLine ->
             val line = rawLine.trim()
             when {
                 line.startsWith("#EXT-X-MAP:") -> {
@@ -372,12 +396,46 @@ object HlsPackageTools {
         onProgress: ((processedBytes: Long, totalBytes: Long) -> Unit)? = null,
     ) {
         val extractor = MediaExtractor()
-        var muxer: MediaMuxer? = null
-        var muxerStarted = false
-        val totalBytes = sourceFile.length().coerceAtLeast(1L)
-        var processedBytes = 0L
         try {
             extractor.setDataSource(sourceFile.absolutePath)
+            remuxExtractorToMp4(context, extractor, sourceFile.length(), outputUri, onProgress)
+        } finally {
+            extractor.release()
+        }
+    }
+
+    private fun remuxLocalPackageToMp4(
+        context: Context,
+        playlist: MediaPlaylist,
+        totalBytes: Long,
+        outputUri: Uri,
+        onProgress: ((processedBytes: Long, totalBytes: Long) -> Unit)? = null,
+    ) {
+        val dataSource = PackageMediaDataSource(packageSourceFiles(playlist))
+        val extractor = MediaExtractor()
+        try {
+            extractor.setDataSource(dataSource)
+            remuxExtractorToMp4(context, extractor, totalBytes, outputUri, onProgress)
+        } finally {
+            extractor.release()
+            dataSource.close()
+        }
+    }
+
+    private fun remuxExtractorToMp4(
+        context: Context,
+        extractor: MediaExtractor,
+        sourceBytes: Long,
+        outputUri: Uri,
+        onProgress: ((processedBytes: Long, totalBytes: Long) -> Unit)? = null,
+    ) {
+        var muxer: MediaMuxer? = null
+        var muxerStarted = false
+        val totalBytes = sourceBytes.coerceAtLeast(1L)
+        var processedBytes = 0L
+        var lastProgressBytes = 0L
+        val progressStepBytes = (totalBytes / 160L).coerceAtLeast(512L * 1024L)
+        try {
             context.contentResolver.openFileDescriptor(outputUri, "rw")?.use { descriptor ->
                 muxer = MediaMuxer(descriptor.fileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 val selectedTracks = linkedMapOf<Int, Int>()
@@ -402,7 +460,7 @@ object HlsPackageTools {
                 muxer!!.start()
                 muxerStarted = true
 
-                val buffer = ByteBuffer.allocate(maxBufferSize)
+                val buffer = ByteBuffer.allocateDirect(maxBufferSize)
                 val info = MediaCodec.BufferInfo()
                 while (true) {
                     val inputTrackIndex = extractor.sampleTrackIndex
@@ -422,20 +480,42 @@ object HlsPackageTools {
                     info.offset = 0
                     info.size = sampleSize
                     info.presentationTimeUs = extractor.sampleTime
-                    info.flags = extractor.sampleFlags
+                    info.flags = mediaCodecFlagsFor(extractor.sampleFlags)
                     muxer!!.writeSampleData(outputTrackIndex, buffer, info)
                     processedBytes += sampleSize.toLong()
-                    onProgress?.invoke(processedBytes.coerceAtMost(totalBytes), totalBytes)
+                    val reportedBytes = processedBytes.coerceAtMost(totalBytes)
+                    if (reportedBytes - lastProgressBytes >= progressStepBytes || reportedBytes >= totalBytes) {
+                        lastProgressBytes = reportedBytes
+                        onProgress?.invoke(reportedBytes, totalBytes)
+                    }
                     extractor.advance()
                 }
+                onProgress?.invoke(totalBytes, totalBytes)
             } ?: throw IOException("无法创建 MP4 封装器")
         } finally {
             if (muxerStarted) {
                 runCatching { muxer?.stop() }
             }
             muxer?.release()
-            extractor.release()
         }
+    }
+
+    private fun packageSourceFiles(playlist: MediaPlaylist): List<File> {
+        return buildList {
+            playlist.initializationSegment?.let { add(File(it.url)) }
+            playlist.segments.forEach { add(File(it.url)) }
+        }.filter { it.length() > 0L }
+    }
+
+    private fun mediaCodecFlagsFor(sampleFlags: Int): Int {
+        var flags = 0
+        if (sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) {
+            flags = flags or MediaCodec.BUFFER_FLAG_KEY_FRAME
+        }
+        if (sampleFlags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0) {
+            flags = flags or MediaCodec.BUFFER_FLAG_PARTIAL_FRAME
+        }
+        return flags
     }
 
     private fun packageSourceBytes(playlist: MediaPlaylist): Long {
@@ -443,24 +523,107 @@ object HlsPackageTools {
         return initBytes + playlist.segments.sumOf { File(it.url).length() }
     }
 
+    private data class PackageSourceEntry(
+        val file: File,
+        val start: Long,
+        val length: Long,
+    )
+
+    private class PackageMediaDataSource(files: List<File>) : MediaDataSource() {
+        private val entries: List<PackageSourceEntry>
+        private val totalSize: Long
+        private var openEntry: PackageSourceEntry? = null
+        private var openFile: RandomAccessFile? = null
+
+        init {
+            var offset = 0L
+            entries = files.map { file ->
+                PackageSourceEntry(file = file, start = offset, length = file.length()).also {
+                    offset += it.length
+                }
+            }
+            totalSize = offset
+            if (entries.isEmpty() || totalSize <= 0L) {
+                throw IOException("本地流媒体包为空")
+            }
+        }
+
+        @Synchronized
+        override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+            if (position < 0L || position >= totalSize || size <= 0) {
+                return -1
+            }
+            var copied = 0
+            var cursor = position
+            val targetSize = minOf(size.toLong(), totalSize - position).toInt()
+            while (copied < targetSize && cursor < totalSize) {
+                val entry = findEntry(cursor) ?: break
+                val entryOffset = cursor - entry.start
+                val bytesToRead = minOf((targetSize - copied).toLong(), entry.length - entryOffset).toInt()
+                val file = fileForEntry(entry)
+                file.seek(entryOffset)
+                val read = file.read(buffer, offset + copied, bytesToRead)
+                if (read <= 0) {
+                    break
+                }
+                copied += read
+                cursor += read
+            }
+            return if (copied > 0) copied else -1
+        }
+
+        override fun getSize(): Long = totalSize
+
+        @Synchronized
+        override fun close() {
+            openFile?.close()
+            openFile = null
+            openEntry = null
+        }
+
+        private fun findEntry(position: Long): PackageSourceEntry? {
+            var low = 0
+            var high = entries.lastIndex
+            while (low <= high) {
+                val middle = (low + high).ushr(1)
+                val entry = entries[middle]
+                when {
+                    position < entry.start -> high = middle - 1
+                    position >= entry.start + entry.length -> low = middle + 1
+                    else -> return entry
+                }
+            }
+            return null
+        }
+
+        private fun fileForEntry(entry: PackageSourceEntry): RandomAccessFile {
+            if (openEntry != entry) {
+                openFile?.close()
+                openFile = RandomAccessFile(entry.file, "r")
+                openEntry = entry
+            }
+            return openFile ?: RandomAccessFile(entry.file, "r").also {
+                openFile = it
+                openEntry = entry
+            }
+        }
+    }
+
     private fun createOutputUri(context: Context, fileName: String, mimeType: String, downloadSubdirectory: String): Uri {
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, fileName)
             put(MediaStore.Downloads.MIME_TYPE, mimeType)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$downloadSubdirectory")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
+            put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$downloadSubdirectory")
+            put(MediaStore.Downloads.IS_PENDING, 1)
         }
         return context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
             ?: throw IOException("无法写入下载目录")
     }
 
     private fun finalizePending(context: Context, uri: Uri) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
-            context.contentResolver.update(uri, values, null, null)
-        }
+        context.contentResolver.update(uri, ContentValues().apply {
+            put(MediaStore.Downloads.IS_PENDING, 0)
+        }, null, null)
     }
 
     private fun deleteOutputUri(context: Context, uri: Uri) {
@@ -498,30 +661,17 @@ object HlsPackageTools {
                 return downloadBytesOnce(url, headers)
             } catch (error: Throwable) {
                 lastError = error
+                if (it < 2) {
+                    Thread.sleep(1500L * (it + 1))
+                }
             }
         }
         throw IOException(lastError?.message ?: "流媒体下载失败", lastError)
     }
 
     private fun downloadBytesOnce(url: String, headers: RequestHeaders): ByteArray {
-        val connection = URL(url).openConnection() as HttpURLConnection
+        val connection = openReadableConnection(url, headers)
         try {
-            connection.instanceFollowRedirects = true
-            connection.connectTimeout = 15000
-            connection.readTimeout = 30000
-            headers.referer?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Referer", it) }
-            headers.userAgent?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("User-Agent", it) }
-            headers.cookie?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Cookie", it) }
-            headers.origin?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Origin", it) }
-            connection.setRequestProperty("Accept", "*/*")
-            connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag())
-            connection.setRequestProperty("Connection", "keep-alive")
-            connection.connect()
-
-            if (connection.responseCode !in 200..299) {
-                throw IOException("下载失败: ${connection.responseCode}")
-            }
-
             return connection.inputStream.use { input ->
                 val output = ByteArrayOutputStream()
                 input.copyTo(output)
@@ -529,6 +679,147 @@ object HlsPackageTools {
             }
         } finally {
             connection.disconnect()
+        }
+    }
+
+    private fun downloadFile(url: String, headers: RequestHeaders, target: File): Long {
+        var lastError: Throwable? = null
+        repeat(3) {
+            try {
+                return downloadFileOnce(url, headers, target)
+            } catch (error: Throwable) {
+                lastError = error
+                if (it < 2) {
+                    Thread.sleep(1500L * (it + 1))
+                }
+            }
+        }
+        throw IOException(lastError?.message ?: "流媒体下载失败", lastError)
+    }
+
+    private fun downloadFileOnce(url: String, headers: RequestHeaders, target: File): Long {
+        val connection = openReadableConnection(url, headers)
+        val tmp = File(target.parentFile, "${target.name}.part")
+        try {
+            target.parentFile?.mkdirs()
+            connection.inputStream.use { input ->
+                tmp.outputStream().buffered().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            replaceFile(tmp, target)
+            return target.length()
+        } finally {
+            connection.disconnect()
+            if (tmp.exists()) {
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun openReadableConnection(url: String, headers: RequestHeaders): HttpURLConnection {
+        val connection = URL(url).openConnection() as HttpURLConnection
+        connection.instanceFollowRedirects = true
+        connection.connectTimeout = 15000
+        connection.readTimeout = 30000
+        val userAgent = headers.userAgent?.takeIf { it.isNotBlank() }
+            ?: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+        connection.setRequestProperty("User-Agent", userAgent)
+        headers.referer?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Referer", it) }
+        val cookie = headers.cookie?.takeIf { it.isNotBlank() }
+            ?: CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
+        if (!cookie.isNullOrBlank()) {
+            connection.setRequestProperty("Cookie", cookie)
+        }
+        headers.origin?.takeIf { it.isNotBlank() }?.let { connection.setRequestProperty("Origin", it) }
+        connection.setRequestProperty("Accept", "*/*")
+        connection.setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag())
+        connection.setRequestProperty("Connection", "keep-alive")
+        connection.setRequestProperty("Sec-Fetch-Dest", "empty")
+        connection.setRequestProperty("Sec-Fetch-Mode", "cors")
+        connection.setRequestProperty("Sec-Fetch-Site", "cross-site")
+        connection.connect()
+
+        val code = connection.responseCode
+        if (code !in 200..299) {
+            connection.disconnect()
+            Log.e(TAG, "HTTP $code for $url")
+            throw IOException("下载失败: $code")
+        }
+        Log.d(TAG, "HTTP $code OK, size=${connection.contentLength} for ${url.take(100)}")
+        return connection
+    }
+
+    private fun writeBytesAtomically(target: File, bytes: ByteArray) {
+        target.parentFile?.mkdirs()
+        val tmp = File(target.parentFile, "${target.name}.part")
+        try {
+            tmp.outputStream().use { it.write(bytes) }
+            replaceFile(tmp, target)
+        } finally {
+            if (tmp.exists()) {
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun replaceFile(source: File, target: File) {
+        if (!source.renameTo(target)) {
+            source.copyTo(target, overwrite = true)
+            source.delete()
+        }
+    }
+
+    private suspend fun downloadSegmentsParallel(
+        playlist: MediaPlaylist,
+        rootDir: File,
+        playlistFile: File,
+        headers: RequestHeaders,
+        concurrency: Int,
+        shouldContinue: (() -> Boolean)?,
+        onProgress: (done: Int, totalBytes: Long) -> Unit,
+    ) = coroutineScope {
+        val segmentConcurrency = concurrency.coerceIn(1, 8)
+        val semaphore = Semaphore(segmentConcurrency)
+        var doneCount = 0
+        var totalBytes = 0L
+        val segments = playlist.segments
+
+        segments.chunked(segmentConcurrency).forEach { batch ->
+            if (shouldContinue?.invoke() == false) {
+                throw IOException("任务已停止")
+            }
+            val jobs = batch.map { segment ->
+                async {
+                    semaphore.withPermit {
+                        val target = File(rootDir, segment.localName)
+                        if (!target.exists() || target.length() <= 0L) {
+                            val bytes = segment.encryption?.let { encryption ->
+                                val encrypted = downloadBytes(segment.url, headers)
+                                val keyBytes = downloadBytes(encryption.keyUrl, headers)
+                                decryptSegment(encrypted, keyBytes, encryption.iv ?: ivForSequence(segment.sequence))
+                            }
+                            if (bytes != null) {
+                                writeBytesAtomically(target, bytes)
+                            } else {
+                                downloadFile(segment.url, headers, target)
+                            }
+                        }
+                        target.length()
+                    }
+                }
+            }
+            val batchSizes = jobs.awaitAll()
+            batchSizes.forEach { size ->
+                totalBytes += size
+                doneCount += 1
+            }
+            writeLocalPlaylist(
+                playlistFile = playlistFile,
+                playlist = playlist.copy(segments = segments.take(doneCount)),
+                appendEndList = false,
+            )
+            onProgress(doneCount, totalBytes)
         }
     }
 
@@ -586,4 +877,5 @@ object HlsPackageTools {
     }
 
     private const val PLAYLIST_FILE_NAME = "index.m3u8"
+    private const val DEFAULT_SEGMENT_CONCURRENCY = 4
 }

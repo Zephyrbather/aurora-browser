@@ -17,7 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
-    private val store = BrowserStore(application)
+    private val store = BrowserStore.getInstance(application)
     private val preferences = BrowserPreferences(application)
 
     private val _uiState = MutableStateFlow(BrowserUiState(settings = preferences.getSettings()))
@@ -42,6 +42,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onProgressChanged(progress: Int) {
+        val current = _uiState.value.loadingProgress
+        if (progress == current) return
+        if (progress !in intArrayOf(0, 100) && current !in intArrayOf(0, 100) && kotlin.math.abs(progress - current) < 5) return
         _uiState.update { it.copy(loadingProgress = progress, isLoading = progress in 0..99) }
     }
 
@@ -68,6 +71,26 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 store.addHistory(resolvedTitle, resolvedUrl)
             }
         }
+    }
+
+    fun showTab(url: String?, title: String?, canGoBack: Boolean, canGoForward: Boolean) {
+        val resolvedUrl = url?.takeIf { it.isNotBlank() } ?: DEFAULT_HOME_URL
+        val resolvedTitle = title?.takeIf(String::isNotBlank)
+            ?: if (resolvedUrl == DEFAULT_HOME_URL) "Aurora Browser" else resolvedUrl
+        _uiState.update {
+            it.copy(
+                currentUrl = resolvedUrl,
+                addressBarText = displayAddress(resolvedUrl),
+                pageTitle = resolvedTitle,
+                isLoading = false,
+                loadingProgress = if (resolvedUrl == DEFAULT_HOME_URL) 0 else 100,
+                canGoBack = canGoBack,
+                canGoForward = canGoForward,
+                findMatchOrdinal = 0,
+                findMatchCount = 0,
+            )
+        }
+        refreshBookmarkState(resolvedUrl)
     }
 
     fun updateNavigationState(canGoBack: Boolean, canGoForward: Boolean) {
@@ -131,7 +154,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             it.copy(
                 settings = it.settings.copy(
                     themeMode = mode,
-                    nightMode = mode.isDark,
+                    nightMode = BrowserThemeTools.isEffectivelyDark(mode),
                 ),
             )
         }

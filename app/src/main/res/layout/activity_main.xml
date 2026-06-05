@@ -49,26 +49,26 @@
         </com.google.android.material.textfield.TextInputLayout>
 
         <ImageButton
-            android:id="@+id/goButton"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:layout_marginStart="8dp"
+            android:id="@+id/refreshButton"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/cd_go"
-            android:padding="10dp"
-            android:src="@drawable/ic_search"
-            android:tint="@color/aurora_text" />
+            android:contentDescription="@string/cd_reload"
+            android:padding="7dp"
+            android:src="@drawable/ic_refresh"
+            app:tint="@color/aurora_text" />
 
         <ImageButton
             android:id="@+id/bookmarkButton"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:layout_marginStart="4dp"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="2dp"
             android:background="?attr/selectableItemBackgroundBorderless"
             android:contentDescription="@string/cd_bookmark"
-            android:padding="10dp"
+            android:padding="7dp"
             android:src="@drawable/ic_bookmark_outline"
-            android:tint="@color/aurora_text" />
+            app:tint="@color/aurora_text" />
 
     </LinearLayout>
 
@@ -116,7 +116,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
-            android:text="0/0"
+            android:text="@string/find_status_default"
             android:textColor="@color/aurora_text_muted" />
 
         <ImageButton
@@ -128,7 +128,7 @@
             android:contentDescription="@string/cd_find_prev"
             android:padding="10dp"
             android:src="@drawable/ic_back"
-            android:tint="@color/aurora_text" />
+            app:tint="@color/aurora_text" />
 
         <ImageButton
             android:id="@+id/findNextButton"
@@ -138,7 +138,7 @@
             android:contentDescription="@string/cd_find_next"
             android:padding="10dp"
             android:src="@drawable/ic_forward"
-            android:tint="@color/aurora_text" />
+            app:tint="@color/aurora_text" />
 
         <ImageButton
             android:id="@+id/findCloseButton"
@@ -148,7 +148,7 @@
             android:contentDescription="@string/cd_close"
             android:padding="10dp"
             android:src="@drawable/ic_close"
-            android:tint="@color/aurora_text" />
+            app:tint="@color/aurora_text" />
     </LinearLayout>
 
     <FrameLayout
@@ -168,7 +168,7 @@
             android:id="@+id/homeBackgroundScrim"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:background="#AAFFFFFF"
+            android:background="@color/aurora_scrim"
             android:visibility="gone" />
 
         <LinearLayout
@@ -238,7 +238,7 @@
                         android:contentDescription="@string/cd_scan_qr"
                         android:padding="8dp"
                         android:src="@drawable/ic_qr_scan"
-                        android:tint="@color/aurora_text" />
+                        app:tint="@color/aurora_text" />
 
                     <ImageButton
                         android:id="@+id/homeGoButton"
@@ -248,7 +248,7 @@
                         android:contentDescription="@string/cd_go"
                         android:padding="10dp"
                         android:src="@drawable/ic_search"
-                        android:tint="@color/aurora_text" />
+                        app:tint="@color/aurora_text" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -267,7 +267,7 @@
                     android:contentDescription="@string/cd_open_bookmarks"
                     android:padding="12dp"
                     android:src="@drawable/ic_bookmark_outline"
-                    android:tint="@color/aurora_text" />
+                    app:tint="@color/aurora_text" />
 
                 <ImageButton
                     android:id="@+id/homeHistoryButton"
@@ -278,7 +278,7 @@
                     android:contentDescription="@string/cd_open_history"
                     android:padding="12dp"
                     android:src="@drawable/ic_history"
-                    android:tint="@color/aurora_text" />
+                    app:tint="@color/aurora_text" />
 
                 <ImageButton
                     android:id="@+id/homeResourcesButton"
@@ -286,10 +286,10 @@
                     android:layout_height="52dp"
                     android:layout_marginStart="8dp"
                     android:background="?attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="@string/cd_open_resources"
+                    android:contentDescription="@string/cd_magnet_search"
                     android:padding="12dp"
-                    android:src="@drawable/ic_resources"
-                    android:tint="@color/aurora_text" />
+                    android:src="@drawable/ic_magnet"
+                    app:tint="@color/aurora_text" />
 
                 <ImageButton
                     android:id="@+id/homeDownloadsButton"
@@ -300,7 +300,7 @@
                     android:contentDescription="@string/cd_open_downloads"
                     android:padding="12dp"
                     android:src="@drawable/ic_download"
-                    android:tint="@color/aurora_text" />
+                    app:tint="@color/aurora_text" />
 
                 <ImageButton
                     android:id="@+id/homeIncognitoButton"
@@ -311,7 +311,7 @@
                     android:contentDescription="@string/cd_toggle_incognito"
                     android:padding="12dp"
                     android:src="@drawable/ic_incognito"
-                    android:tint="@color/aurora_text" />
+                    app:tint="@color/aurora_text" />
             </LinearLayout>
 
             <LinearLayout
@@ -371,13 +371,13 @@
 
                     <ImageButton
                         android:id="@+id/homeAddSiteButton"
-                        android:layout_width="36dp"
-                        android:layout_height="36dp"
+                        android:layout_width="48dp"
+                        android:layout_height="48dp"
                         android:background="?attr/selectableItemBackgroundBorderless"
                         android:contentDescription="@string/cd_add_home_site"
                         android:padding="6dp"
                         android:src="@drawable/ic_add"
-                        android:tint="@color/aurora_text" />
+                        app:tint="@color/aurora_text" />
                 </LinearLayout>
 
                 <LinearLayout
@@ -394,10 +394,17 @@
                 android:layout_weight="1" />
         </LinearLayout>
 
-        <WebView
-            android:id="@+id/webView"
+        <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+            android:id="@+id/swipeRefresh"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
+            android:layout_height="match_parent">
+
+            <WebView
+                android:id="@+id/webView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+        </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
         <TextView
             android:id="@+id/overlayTip"
@@ -405,7 +412,7 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:alpha="0.75"
-            android:text="无痕模式下不会记录历史"
+            android:text="@string/overlay_incognito_tip"
             android:textColor="@color/aurora_text_muted"
             android:visibility="gone" />
     </FrameLayout>
@@ -438,7 +445,7 @@
                 android:contentDescription="@string/cd_back"
                 android:padding="10dp"
                 android:src="@drawable/ic_back"
-                android:tint="@color/aurora_text" />
+                app:tint="@color/aurora_text" />
 
             <ImageButton
                 android:id="@+id/forwardButton"
@@ -449,7 +456,7 @@
                 android:contentDescription="@string/cd_forward"
                 android:padding="10dp"
                 android:src="@drawable/ic_forward"
-                android:tint="@color/aurora_text" />
+                app:tint="@color/aurora_text" />
 
             <ImageButton
                 android:id="@+id/homeButton"
@@ -460,7 +467,7 @@
                 android:contentDescription="@string/cd_home"
                 android:padding="10dp"
                 android:src="@drawable/ic_home"
-                android:tint="@color/aurora_text" />
+                app:tint="@color/aurora_text" />
 
             <FrameLayout
                 android:layout_width="0dp"
@@ -475,7 +482,7 @@
                     android:contentDescription="@string/cd_tabs"
                     android:padding="10dp"
                     android:src="@drawable/ic_tabs"
-                    android:tint="@color/aurora_text" />
+                    app:tint="@color/aurora_text" />
 
                 <TextView
                     android:id="@+id/tabsCountText"
@@ -500,7 +507,7 @@
                 android:contentDescription="@string/cd_menu"
                 android:padding="10dp"
                 android:src="@drawable/ic_menu"
-                android:tint="@color/aurora_text" />
+                app:tint="@color/aurora_text" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
