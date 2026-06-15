@@ -257,9 +257,10 @@ class LibraryAdapter(
             }
         }
 
+        private val displayDensity: Float by lazy { binding.root.resources.displayMetrics.density }
+
         private fun dp(value: Int): Int {
-            val density = binding.root.resources.displayMetrics.density
-            return (value * density + 0.5f).toInt()
+            return (value * displayDensity + 0.5f).toInt()
         }
     }
 }

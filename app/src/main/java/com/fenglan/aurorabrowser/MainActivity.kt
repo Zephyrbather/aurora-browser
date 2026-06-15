@@ -35,6 +35,7 @@ import android.util.TypedValue
 import android.view.ViewGroup
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
@@ -85,6 +86,7 @@ import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
 import com.fenglan.aurorabrowser.browser.AdBlocker
 import com.fenglan.aurorabrowser.browser.BrowserDownloads
+import com.fenglan.aurorabrowser.browser.BrowserNavigationStateTools
 import com.fenglan.aurorabrowser.browser.BrowserPreferences
 import com.fenglan.aurorabrowser.browser.BrowserThemePalette
 import com.fenglan.aurorabrowser.browser.BrowserThemeTools
@@ -106,6 +108,7 @@ import com.fenglan.aurorabrowser.model.BrowserUiState
 import com.fenglan.aurorabrowser.model.DEFAULT_HOME_URL
 import com.fenglan.aurorabrowser.model.FileCategory
 import com.fenglan.aurorabrowser.model.HomeSiteItem
+import com.fenglan.aurorabrowser.model.HomeStyle
 import com.fenglan.aurorabrowser.model.LibraryMode
 import com.fenglan.aurorabrowser.model.P2pDownloadEngine
 import com.fenglan.aurorabrowser.model.ResourceItem
@@ -121,6 +124,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import androidx.webkit.WebSettingsCompat
@@ -153,6 +157,11 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var currentPageUrlForGuards: String = DEFAULT_HOME_URL
     @Volatile private var lastCommittedPageUrlForGuards: String = DEFAULT_HOME_URL
     @Volatile private var lastAppNavigationAtMillis: Long = 0L
+    private var homeKeyboardVisible = false
+    private val animFadeIn by lazy { AnimationUtils.loadAnimation(this, R.anim.aurora_fade_in) }
+    private val animFadeOut by lazy { AnimationUtils.loadAnimation(this, R.anim.aurora_fade_out) }
+    private val animSlideInTop by lazy { AnimationUtils.loadAnimation(this, R.anim.aurora_slide_in_top) }
+    private val animSlideOutTop by lazy { AnimationUtils.loadAnimation(this, R.anim.aurora_slide_out_top) }
     @Volatile private var lastTrustedWebNavigationAtMillis: Long = 0L
     @Volatile private var lastExplicitNavigationUrl: String? = null
     @Volatile private var lastExplicitNavigationAtMillis: Long = 0L
@@ -258,6 +267,7 @@ class MainActivity : AppCompatActivity() {
         ensureInitialTab()
 
         setupWebView()
+        setupSwipeRefresh()
         setupFindBar()
         setupPrimaryActions()
         observeState()
@@ -364,6 +374,9 @@ class MainActivity : AppCompatActivity() {
     private fun setupSwipeRefresh() {
         binding.swipeRefresh.setColorSchemeColors(currentThemePalette.accent)
         binding.swipeRefresh.setProgressBackgroundColorSchemeColor(currentThemePalette.surfaceAlt)
+        binding.swipeRefresh.setOnChildScrollUpCallback { _, _ ->
+            currentWebView().canScrollVertically(-1)
+        }
         binding.swipeRefresh.setOnRefreshListener {
             val url = currentWebView().url
             if (!url.isNullOrBlank() && url != DEFAULT_HOME_URL) {
@@ -419,6 +432,7 @@ class MainActivity : AppCompatActivity() {
                     referer = pageUrl,
                     userAgent = userAgent,
                     declaredSize = contentLength.takeIf { it > 0 },
+                    isPrivate = preferences.getDefaultPrivacyDownload(),
                 )
                 Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
             }
@@ -556,7 +570,11 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                     val targetUrl = url ?: DEFAULT_HOME_URL
-                    tabForWebView(view)?.url = targetUrl
+                    tabForWebView(view)?.let { tab ->
+                        if (!tab.frozen || targetUrl != DEFAULT_HOME_URL) {
+                            tab.url = targetUrl
+                        }
+                    }
                     if (view != currentWebView()) {
                         return
                     }
@@ -586,7 +604,7 @@ class MainActivity : AppCompatActivity() {
                     viewModel.onPageStarted(url)
                     viewModel.updateNavigationState(this@apply.canGoBack(), this@apply.canGoForward())
                     if (url != DEFAULT_HOME_URL) {
-                        view?.evaluateJavascript(
+                        view.evaluateJavascript(
                             "(function(){try{if(window.__auroraObserver){window.__auroraObserver.disconnect();window.__auroraObserver=null;}if(window.__auroraTick){clearInterval(window.__auroraTick);window.__auroraTick=null;}window.__auroraSnifferInstalled=false;}catch(e){}})()",
                             null,
                         )
@@ -594,9 +612,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    tabForWebView(view)?.apply {
-                        this.url = url ?: this.url
-                        title = view?.title?.takeIf(String::isNotBlank) ?: title
+                    val finishedTab = tabForWebView(view)
+                    finishedTab?.apply {
+                        val finishedUrl = url ?: this.url
+                        if (!frozen || finishedUrl != DEFAULT_HOME_URL) {
+                            this.url = finishedUrl
+                            title = view?.title?.takeIf(String::isNotBlank) ?: title
+                        }
                     }
                     if (view != currentWebView()) {
                         return
@@ -605,13 +627,21 @@ class MainActivity : AppCompatActivity() {
                     lastCommittedPageUrlForGuards = url ?: lastCommittedPageUrlForGuards
                     viewModel.onPageFinished(url, view.title)
                     viewModel.updateNavigationState(this@apply.canGoBack(), this@apply.canGoForward())
-                    injectResourceSniffer()
-                    syncInjectedPageTheme(BrowserThemeTools.isEffectivelyDark(viewModel.uiState.value.settings.themeMode))
+                    if (url == DEFAULT_HOME_URL && finishedTab?.url == DEFAULT_HOME_URL) {
+                        showHomeSurface(refreshData = true)
+                        binding.swipeRefresh.isRefreshing = false
+                        persistTabs()
+                        return
+                    }
+                    if (!shouldSkipJsInjection(url)) {
+                        injectResourceSniffer()
+                        syncInjectedPageTheme(BrowserThemeTools.isEffectivelyDark(viewModel.uiState.value.settings.themeMode))
+                    }
                     url?.takeIf { it != DEFAULT_HOME_URL }?.let(::fetchBestPageIcon)
                     if ((translationEnabled || effectiveAutoTranslateEnabled(url)) && !url.isNullOrBlank() && url != DEFAULT_HOME_URL) {
                         binding.root.postDelayed({ translateCurrentPage(force = effectiveAutoTranslateEnabled(url)) }, 260L)
                     }
-                    if (effectiveAutofillEnabled(url)) {
+                    if (effectiveAutofillEnabled(url) && !shouldSkipJsInjection(url)) {
                         injectCredentialAssistant()
                         scheduleCredentialAutofill(url)
                     }
@@ -627,7 +657,12 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onPageCommitVisible(view: WebView?, url: String?) {
-                    tabForWebView(view)?.url = url ?: tabForWebView(view)?.url ?: DEFAULT_HOME_URL
+                    tabForWebView(view)?.let { tab ->
+                        val committedUrl = url ?: tab.url
+                        if (!tab.frozen || committedUrl != DEFAULT_HOME_URL) {
+                            tab.url = committedUrl
+                        }
+                    }
                     if (view == currentWebView()) {
                         currentPageUrlForGuards = url ?: currentPageUrlForGuards
                         lastCommittedPageUrlForGuards = url ?: lastCommittedPageUrlForGuards
@@ -637,7 +672,9 @@ class MainActivity : AppCompatActivity() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
                     val target = request?.url
                     val state = viewModel.uiState.value
-                    if (effectiveAdBlockEnabled(tabForWebView(view)?.url ?: state.currentUrl) &&
+                    val pageUrl = tabForWebView(view)?.url ?: state.currentUrl
+                    if (effectiveAdBlockEnabled(pageUrl) &&
+                        !shouldSkipJsInjection(pageUrl) &&
                         shouldBlockResourceRequest(target?.toString(), request?.isForMainFrame == true)) {
                         if (view == currentWebView()) {
                             viewModel.incrementBlockedCount()
@@ -682,6 +719,7 @@ class MainActivity : AppCompatActivity() {
         binding.homeIncognitoButton.setOnClickListener {
             requestIncognitoMode(!viewModel.uiState.value.incognito)
         }
+        setupMinimalDragHandler()
         binding.backButton.setOnClickListener {
             if (currentWebView().canGoBack()) {
                 noteNavigationIntent()
@@ -740,11 +778,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         binding.homeSearchInput.setOnFocusChangeListener { _, hasFocus ->
-            if (hasFocus) {
-                showRecentSearches(binding.homeSearchInput, binding.homeSearchInput.text?.toString().orEmpty())
-            } else {
-                dismissRecentSearches()
-            }
+            handleHomeSearchFocusChange(hasFocus)
         }
         binding.homeSearchInput.setOnClickListener {
             showRecentSearches(binding.homeSearchInput, binding.homeSearchInput.text?.toString().orEmpty())
@@ -786,17 +820,17 @@ class MainActivity : AppCompatActivity() {
         val showHome = isHomeScreen(state)
         if (binding.homePanel.isVisible != showHome) {
             if (showHome) {
-                currentWebView().startAnimation(AnimationUtils.loadAnimation(this, R.anim.aurora_fade_out))
-                binding.homePanel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.aurora_fade_in))
+                currentWebView().startAnimation(animFadeOut)
+                binding.homePanel.startAnimation(animFadeIn)
             } else {
-                binding.homePanel.startAnimation(AnimationUtils.loadAnimation(this, R.anim.aurora_fade_out))
-                currentWebView().startAnimation(AnimationUtils.loadAnimation(this, R.anim.aurora_fade_in))
+                binding.homePanel.startAnimation(animFadeOut)
+                currentWebView().startAnimation(animFadeIn)
             }
         }
         binding.homePanel.isVisible = showHome
         updateWebViewVisibility(showHome)
         binding.toolbar.isVisible = false
-        binding.addressBarContainer.isVisible = !showHome
+        binding.addressBarContainer.isVisible = !showHome && !isOnCustomStartPage(state)
         if (showHome && binding.findBar.isVisible) {
             hideFindBar()
         }
@@ -818,10 +852,16 @@ class MainActivity : AppCompatActivity() {
         binding.homeIncognitoButton.alpha = if (state.incognito) 1f else 0.55f
         updateTabsCountBadge()
         if (showHome) {
-            if (customHomeSites.isEmpty() && mostVisitedSites.isEmpty()) {
-                customHomeSites = store.getHomeSites()
-                if (state.settings.showMostVisitedSites) {
-                    mostVisitedSites = store.getTopSites(HOME_TOP_SITE_LIMIT)
+            if (needsHomeSectionData(state)) {
+                lifecycleScope.launch {
+                    val homes = withContext(Dispatchers.IO) { store.getHomeSites() }
+                    val top = withContext(Dispatchers.IO) {
+                        if (state.settings.showMostVisitedSites) store.getTopSites(HOME_TOP_SITE_LIMIT)
+                        else emptyList()
+                    }
+                    customHomeSites = homes
+                    mostVisitedSites = top
+                    refreshHomeSections(viewModel.uiState.value.copy(currentUrl = DEFAULT_HOME_URL))
                 }
             }
             renderHomeSectionsIfNeeded(state, force = true)
@@ -833,6 +873,10 @@ class MainActivity : AppCompatActivity() {
             binding.addressBarContainer.isVisible = false
             binding.bottomBarCard.isVisible = false
         }
+    }
+
+    private fun needsHomeSectionData(state: BrowserUiState): Boolean {
+        return customHomeSites.isEmpty() && (state.settings.showMostVisitedSites && mostVisitedSites.isEmpty())
     }
 
     private fun buildSubtitle(state: BrowserUiState): String {
@@ -1083,7 +1127,7 @@ class MainActivity : AppCompatActivity() {
             actions += BrowserMenuAction(R.drawable.ic_info, "诊断") { showPrivacyDiagnosticsDialog() }
             actions += BrowserMenuAction(R.drawable.ic_find, "页内查找") {
                 binding.findBar.isVisible = true
-                binding.findBar.startAnimation(AnimationUtils.loadAnimation(this@MainActivity, R.anim.aurora_slide_in_top))
+                binding.findBar.startAnimation(animSlideInTop)
                 binding.findInput.requestFocus()
             }
             actions += BrowserMenuAction(
@@ -1142,10 +1186,8 @@ class MainActivity : AppCompatActivity() {
                 refreshMostVisitedSites()
             } else {
                 mostVisitedSites = emptyList()
-                invalidateHomeSections()
-                renderHomeSectionsIfNeeded(
+                refreshHomeSections(
                     viewModel.uiState.value.copy(settings = state.settings.copy(showMostVisitedSites = false)),
-                    force = true,
                 )
             }
         }
@@ -1509,7 +1551,8 @@ class MainActivity : AppCompatActivity() {
         translationJob = lifecycleScope.launch {
             try {
                 val rawResult = evaluateJavascriptAsync(PageTranslator.buildCollectScript())
-                val segments = PageTranslator.parseCollectedSegments(decodeJavascriptStringResult(rawResult))
+                val decoded = decodeJavascriptStringResult(rawResult)
+                val segments = PageTranslator.parseCollectedSegments(decoded)
                 if (segments.isEmpty()) {
                     translatedPageUrl = null
                     if (force) {
@@ -1517,27 +1560,46 @@ class MainActivity : AppCompatActivity() {
                     }
                     return@launch
                 }
-                val translation = withContext(Dispatchers.IO) {
-                    PageTranslator.translate(
-                        engine = viewModel.uiState.value.settings.translationEngine,
-                        segments = segments,
-                        preferences = preferences,
-                    )
+                val engine = viewModel.uiState.value.settings.translationEngine
+                val batches = segments.chunked(6)
+                var appliedCount = 0
+                var failedBatches = 0
+                val webViewEval: suspend (String) -> String = { script -> withContext(Dispatchers.Main) { evaluateJavascriptAsync(script) } }
+                for (batch in batches) {
+                    if (pageUrl != viewModel.uiState.value.currentUrl) return@launch
+                    try {
+                        val batchResult = withContext(Dispatchers.IO) {
+                            PageTranslator.translate(engine, batch, preferences, webViewEval)
+                        }
+                        val newItems = batchResult.items.filter { it.translatedText.isNotBlank() }
+                        if (newItems.isNotEmpty()) {
+                            currentWebView().evaluateJavascript(PageTranslator.buildApplyScript(newItems), null)
+                        }
+                        appliedCount += newItems.size
+                    } catch (e: Throwable) {
+                        failedBatches++
+                    }
                 }
-                if (pageUrl != viewModel.uiState.value.currentUrl) {
+                if (pageUrl != viewModel.uiState.value.currentUrl) return@launch
+                if (appliedCount == 0) {
+                    currentWebView().evaluateJavascript(PageTranslator.buildClearScript(), null)
+                    translatedPageUrl = null
+                    Snackbar.make(binding.root, "翻译失败：所有翻译引擎均不可用", Snackbar.LENGTH_LONG).show()
                     return@launch
                 }
-                currentWebView().evaluateJavascript(PageTranslator.buildApplyScript(translation.items), null)
                 translatedPageUrl = pageUrl
                 translationEnabled = true
-                val message = when {
-                    translation.usedFallback -> "微软翻译暂不可用，已回退到谷歌翻译"
-                    else -> "${translation.engineUsed.label}双语翻译已应用"
+                val total = segments.size
+                val message = if (appliedCount >= total) {
+                    "${engine.label}双语翻译已应用（$appliedCount 段）"
+                } else {
+                    "双语翻译已应用（$appliedCount/$total 段）"
                 }
-                Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
+                Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG).show()
             } catch (error: Throwable) {
                 translatedPageUrl = null
-                Snackbar.make(binding.root, "网页翻译失败", Snackbar.LENGTH_SHORT).show()
+                val detail = error.message?.take(60) ?: "未知错误"
+                Snackbar.make(binding.root, "网页翻译失败：$detail", Snackbar.LENGTH_LONG).show()
             }
         }
     }
@@ -1545,6 +1607,7 @@ class MainActivity : AppCompatActivity() {
     private fun clearPageTranslation() {
         translatedPageUrl = null
         currentWebView().evaluateJavascript(PageTranslator.buildClearScript(), null)
+        PageTranslator.clearSessionCache()
     }
 
     private fun ensureTranslationEngineReady(engine: TranslationEngine): Boolean {
@@ -2558,7 +2621,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun hideFindBar() {
         if (!binding.findBar.isVisible) return
-        val anim = AnimationUtils.loadAnimation(this, R.anim.aurora_slide_out_top).apply {
+        val anim = animSlideOutTop.apply {
             setAnimationListener(object : Animation.AnimationListener {
                 override fun onAnimationStart(a: Animation?) {}
                 override fun onAnimationRepeat(a: Animation?) {}
@@ -2592,8 +2655,8 @@ class MainActivity : AppCompatActivity() {
             noteNavigationIntent()
         }
         dismissRecentSearches()
-        if (target == DEFAULT_HOME_URL) {
-            binding.homeSearchInput.setText("")
+        if (BrowserNavigationStateTools.shouldClearSearchInputsForUrl(target)) {
+            clearBrowserSearchInputs()
             prepareActiveTabGlobals(DEFAULT_HOME_URL)
             viewModel.showTab(
                 DEFAULT_HOME_URL,
@@ -2611,8 +2674,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
         viewModel.setAddressBarText(target)
+        prepareActiveTabGlobals(target)
         applyUserAgentForPage(currentWebView(), target)
         currentWebView().loadUrl(target)
+    }
+
+    private fun clearBrowserSearchInputs() {
+        binding.homeSearchInput.setText("")
+        binding.addressInput.setText("")
+        binding.homeSearchInput.clearFocus()
+        binding.addressInput.clearFocus()
+        viewModel.setAddressBarText("")
+        dismissRecentSearches()
     }
 
     private fun loadInlineHtml(displayUrl: String, html: String, userInitiated: Boolean = false) {
@@ -2677,7 +2750,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun hasExplicitScheme(input: String): Boolean {
-        return Regex("^[a-zA-Z][a-zA-Z\\d+.-]*:(//)?").containsMatchIn(input)
+        return SCHEME_REGEX.containsMatchIn(input)
     }
 
     private fun looksLikeDirectUrl(input: String): Boolean {
@@ -2692,7 +2765,7 @@ class MainActivity : AppCompatActivity() {
         if (host.equals("localhost", ignoreCase = true)) {
             return true
         }
-        if (host.matches(Regex("""\d{1,3}(\.\d{1,3}){3}"""))) {
+        if (host.matches(IPV4_REGEX)) {
             return true
         }
         if (host.startsWith("[") && host.endsWith("]")) {
@@ -2738,9 +2811,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildUserAgent(desktop: Boolean): String {
         return if (desktop) {
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 AuroraBrowser/0.1 Desktop"
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
         } else {
-            "$mobileUserAgent AuroraBrowser/0.1"
+            mobileUserAgent
         }
     }
 
@@ -3667,7 +3740,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showLinkContextMenu(webView: WebView) {
-        val hitTest = webView.hitTestResult ?: return
+        val hitTest = webView.hitTestResult
         val linkUrl = when (hitTest.type) {
             android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE,
             android.webkit.WebView.HitTestResult.ANCHOR_TYPE,
@@ -3841,6 +3914,17 @@ class MainActivity : AppCompatActivity() {
         return state.currentUrl == DEFAULT_HOME_URL
     }
 
+    private fun isOnCustomStartPage(state: BrowserUiState): Boolean {
+        val startUrl = preferences.getStartPageUrl()
+        return startUrl != DEFAULT_HOME_URL && state.currentUrl == startUrl
+    }
+
+    private fun shouldSkipJsInjection(url: String?): Boolean {
+        if (url.isNullOrBlank() || url == DEFAULT_HOME_URL) return true
+        val host = runCatching { Uri.parse(url).host?.lowercase() }.getOrNull() ?: return false
+        return isGoogleRelatedDomain(host)
+    }
+
     private fun ensureInitialTab() {
         if (tabs.isNotEmpty()) {
             return
@@ -3860,7 +3944,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun restoreTabs(): Boolean {
-        val (tabStates, activeId) = store.loadTabs()
+        val (tabStates, activeId) = runBlocking(Dispatchers.IO) { store.loadTabs() }
         if (tabStates.isEmpty()) return false
         currentTabId = activeId
         tabStates.forEachIndexed { index, state ->
@@ -3939,31 +4023,44 @@ class MainActivity : AppCompatActivity() {
     private fun updateWebViewVisibility(showHome: Boolean = isHomeScreen(viewModel.uiState.value)) {
         binding.swipeRefresh.isVisible = !showHome
         if (showHome) binding.swipeRefresh.isRefreshing = false
+        tabs.forEach { tab ->
+            tab.webView.isVisible = !showHome && tab.id == currentTabId && !tab.frozen
+        }
+        if (!showHome) {
+            currentWebView().bringToFront()
+        }
     }
 
     private fun showHomeSurface(refreshData: Boolean = false) {
         val homeState = viewModel.uiState.value.copy(currentUrl = DEFAULT_HOME_URL)
-        binding.homePanel.isVisible = true
+        val onCustomStart = isOnCustomStartPage(viewModel.uiState.value)
+        if (!onCustomStart) {
+            binding.homePanel.isVisible = true
+        }
         binding.addressBarContainer.isVisible = false
         if (binding.findBar.isVisible) {
             hideFindBar()
         }
-        updateWebViewVisibility(showHome = true)
+        updateWebViewVisibility(showHome = !onCustomStart)
         if (refreshData) {
-            customHomeSites = store.getHomeSites()
-            if (homeState.settings.showMostVisitedSites) {
-                mostVisitedSites = store.getTopSites(HOME_TOP_SITE_LIMIT)
-            } else {
-                mostVisitedSites = emptyList()
+            lifecycleScope.launch {
+                val homes = withContext(Dispatchers.IO) { store.getHomeSites() }
+                val top = withContext(Dispatchers.IO) {
+                    if (homeState.settings.showMostVisitedSites) store.getTopSites(HOME_TOP_SITE_LIMIT)
+                    else emptyList()
+                }
+                customHomeSites = homes
+                mostVisitedSites = top
+                refreshHomeSections(viewModel.uiState.value.copy(currentUrl = DEFAULT_HOME_URL))
             }
         }
-        invalidateHomeSections()
-        renderHomeSectionsIfNeeded(homeState, force = true)
+        refreshHomeSections(homeState)
         binding.root.postDelayed({
-            if (isHomeScreen(viewModel.uiState.value) || binding.homePanel.isVisible) {
+            val currentState = viewModel.uiState.value
+            val stillOnCustom = isOnCustomStartPage(currentState)
+            if (!stillOnCustom && isHomeScreen(currentState)) {
                 binding.homePanel.isVisible = true
-                invalidateHomeSections()
-                renderHomeSectionsIfNeeded(viewModel.uiState.value.copy(currentUrl = DEFAULT_HOME_URL), force = true)
+                refreshHomeSections(currentState.copy(currentUrl = DEFAULT_HOME_URL))
             }
         }, 100L)
     }
@@ -4098,6 +4195,7 @@ class MainActivity : AppCompatActivity() {
         tabs += newTab
         setupWebView(webView)
         currentTabId = newTab.id
+        clearBrowserSearchInputs()
         prepareActiveTabGlobals(DEFAULT_HOME_URL)
         viewModel.showTab(DEFAULT_HOME_URL, newTab.title, webView.canGoBack(), webView.canGoForward())
         webView.onResume()
@@ -4118,12 +4216,20 @@ class MainActivity : AppCompatActivity() {
         restoreTab(target)
         ensureTabLoaded(target)
         target.webView.onResume()
-        val targetUrl = target.webView.url ?: target.url
-        val targetTitle = target.webView.title ?: target.title
+        val displayState = BrowserNavigationStateTools.resolveTabDisplayState(
+            savedUrl = target.url,
+            savedTitle = target.title,
+            webViewUrl = target.webView.url,
+            webViewTitle = target.webView.title,
+            frozen = target.frozen,
+        )
+        val targetUrl = displayState.url
+        val targetTitle = displayState.title
         prepareActiveTabGlobals(targetUrl)
         viewModel.showTab(targetUrl, targetTitle, target.webView.canGoBack(), target.webView.canGoForward())
-        updateWebViewVisibility(showHome = targetUrl == DEFAULT_HOME_URL)
-        if (targetUrl == DEFAULT_HOME_URL) {
+        val showHome = targetUrl == DEFAULT_HOME_URL
+        updateWebViewVisibility(showHome = showHome)
+        if (showHome) {
             showHomeSurface(refreshData = true)
         }
         syncActiveTabPageHooks(targetUrl)
@@ -4133,6 +4239,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun freezeTab(tab: BrowserTab) {
         if (tab.frozen || tab.id == currentTabId) return
+        tab.webView.url
+            ?.takeIf { it.isNotBlank() && it != DEFAULT_HOME_URL }
+            ?.let { tab.url = it }
         tab.frozen = true
         tab.webView.stopLoading()
         tab.webView.loadUrl("about:blank")
@@ -4225,6 +4334,7 @@ class MainActivity : AppCompatActivity() {
             isVisible = false
         }
         prepareActiveTabGlobals(DEFAULT_HOME_URL)
+        clearBrowserSearchInputs()
         viewModel.showTab(DEFAULT_HOME_URL, newTab.title, false, false)
         showHomeSurface(refreshData = true)
         updateTabsCountBadge()
@@ -4232,6 +4342,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun disposeClosedTab(tab: BrowserTab) {
+        runCatching { tab.thumbnail?.recycle() }
         tab.thumbnail = null
         tab.webView.onPause()
         tab.webView.stopLoading()
@@ -4408,7 +4519,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun syncActiveTabPageHooks(url: String) {
-        if (url == DEFAULT_HOME_URL) {
+        if (url == DEFAULT_HOME_URL || shouldSkipJsInjection(url)) {
             return
         }
         currentWebView().post {
@@ -5136,8 +5247,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             if (siteIconStore.save(pageUrl, bitmap)) {
                 withContext(Dispatchers.Main) {
-                    invalidateHomeSections()
-                    renderHomeSectionsIfNeeded(homeAwareRenderState(), force = true)
+                    refreshHomeSections()
                 }
             }
         }
@@ -5165,8 +5275,7 @@ class MainActivity : AppCompatActivity() {
             }
             if (saved) {
                 withContext(Dispatchers.Main) {
-                    invalidateHomeSections()
-                    renderHomeSectionsIfNeeded(homeAwareRenderState(), force = true)
+                    refreshHomeSections()
                 }
             }
         }
@@ -5177,8 +5286,7 @@ class MainActivity : AppCompatActivity() {
             customHomeSites = withContext(Dispatchers.IO) {
                 store.getHomeSites()
             }
-            invalidateHomeSections()
-            renderHomeSectionsIfNeeded(homeAwareRenderState(), force = true)
+            refreshHomeSections()
         }
     }
 
@@ -5186,17 +5294,20 @@ class MainActivity : AppCompatActivity() {
         val state = homeAwareRenderState()
         if (!state.settings.showMostVisitedSites) {
             mostVisitedSites = emptyList()
-            invalidateHomeSections()
-            renderHomeSectionsIfNeeded(state, force = true)
+            refreshHomeSections(state)
             return
         }
         lifecycleScope.launch {
             mostVisitedSites = withContext(Dispatchers.IO) {
                 store.getTopSites(HOME_TOP_SITE_LIMIT)
             }
-            invalidateHomeSections()
-            renderHomeSectionsIfNeeded(homeAwareRenderState(), force = true)
+            refreshHomeSections()
         }
+    }
+
+    private fun refreshHomeSections(state: BrowserUiState = homeAwareRenderState()) {
+        invalidateHomeSections()
+        renderHomeSectionsIfNeeded(state, force = true)
     }
 
     private fun homeAwareRenderState(): BrowserUiState {
@@ -5209,8 +5320,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderHomeSectionsIfNeeded(state: BrowserUiState, force: Boolean = false) {
+        val homeStyle = preferences.getHomeStyle()
         val customSignature = buildString {
             append(isHomeScreen(state))
+            append('|')
+            append(homeStyle.key)
             append('|')
             append(state.settings.themeMode.key)
             append('|')
@@ -5226,6 +5340,8 @@ class MainActivity : AppCompatActivity() {
         val topSignature = buildString {
             append(isHomeScreen(state))
             append('|')
+            append(homeStyle.key)
+            append('|')
             append(state.settings.showMostVisitedSites)
             append('|')
             append(state.settings.themeMode.key)
@@ -5238,11 +5354,100 @@ class MainActivity : AppCompatActivity() {
             lastHomeTopSignature = topSignature
             renderMostVisitedSites(state)
         }
+
+        val isMinimal = homeStyle == HomeStyle.MINIMAL && isHomeScreen(state)
+        binding.homeLogo.isVisible = isMinimal
+        binding.homeAppName.isVisible = isMinimal
+        binding.homeQuickActions.isVisible = !isMinimal
+        binding.homeTopSitesSection.isVisible = binding.homeTopSitesSection.isVisible && !isMinimal
+        binding.homeCustomSitesSection.isVisible = binding.homeCustomSitesSection.isVisible && !isMinimal
+        binding.homeSpacer.isVisible = !isMinimal
+        if (isMinimal) {
+            binding.homePanel.gravity = Gravity.CENTER
+            val hPad = (28 * resources.displayMetrics.density).toInt()
+            binding.homePanel.setPadding(hPad, 0, hPad, 0)
+            if (!homeKeyboardVisible) {
+                val baseShift = (resources.displayMetrics.heightPixels * 0.2).toInt()
+                binding.homePanel.translationY = preferences.getHomeVerticalOffset().toFloat() - baseShift
+            }
+        } else {
+            binding.homePanel.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            val hPad = (28 * resources.displayMetrics.density).toInt()
+            val vPadTop = (28 * resources.displayMetrics.density).toInt()
+            val vPadBottom = (24 * resources.displayMetrics.density).toInt()
+            binding.homePanel.setPadding(hPad, vPadTop, hPad, vPadBottom)
+            binding.homePanel.translationY = 0f
+        }
     }
 
     private fun invalidateHomeSections() {
         lastHomeCustomSignature = null
         lastHomeTopSignature = null
+    }
+
+    private fun setupMinimalDragHandler() {
+        var isDragging = false
+        var startRawY = 0f
+        var startOffset = 0
+
+        binding.homeLogo.setOnLongClickListener {
+            if (preferences.getHomeStyle() == HomeStyle.MINIMAL) {
+                isDragging = true
+                startOffset = preferences.getHomeVerticalOffset()
+                it.parent?.requestDisallowInterceptTouchEvent(true)
+                true
+            } else {
+                false
+            }
+        }
+
+        binding.homePanel.setOnTouchListener { _, event ->
+            if (!isDragging) return@setOnTouchListener false
+            val baseShift = (resources.displayMetrics.heightPixels * 0.2).toInt()
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startRawY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = (event.rawY - startRawY).toInt()
+                    binding.homePanel.translationY = (startOffset + dy - baseShift).toFloat()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    val finalOffset = startOffset + (event.rawY - startRawY).toInt()
+                    preferences.setHomeVerticalOffset(finalOffset)
+                    binding.homePanel.translationY = (finalOffset - baseShift).toFloat()
+                    isDragging = false
+                    false
+                }
+                else -> false
+            }
+        }
+
+    }
+
+    private fun handleHomeSearchFocusChange(hasFocus: Boolean) {
+        if (hasFocus) {
+            showRecentSearches(binding.homeSearchInput, binding.homeSearchInput.text?.toString().orEmpty())
+        } else {
+            dismissRecentSearches()
+        }
+        applyMinimalHomeSearchFocus(hasFocus)
+    }
+
+    private fun applyMinimalHomeSearchFocus(hasFocus: Boolean) {
+        if (preferences.getHomeStyle() != HomeStyle.MINIMAL) return
+        if (!isHomeScreen(viewModel.uiState.value)) return
+        val savedOffset = preferences.getHomeVerticalOffset()
+        val baseShift = (resources.displayMetrics.heightPixels * 0.2).toInt()
+        if (hasFocus) {
+            homeKeyboardVisible = true
+            binding.homePanel.translationY = (savedOffset - baseShift * 2).toFloat()
+        } else {
+            homeKeyboardVisible = false
+            binding.homePanel.translationY = (savedOffset - baseShift).toFloat()
+        }
     }
 
     private fun renderCustomHomeSites(state: BrowserUiState) {
@@ -5483,18 +5688,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun siteAccentColor(url: String): Int {
-        val palette = intArrayOf(
-            Color.parseColor("#E85D5D"),
-            Color.parseColor("#2F7CF6"),
-            Color.parseColor("#16A085"),
-            Color.parseColor("#F39C12"),
-            Color.parseColor("#7F56D9"),
-            Color.parseColor("#3949AB"),
-            Color.parseColor("#00897B"),
-            Color.parseColor("#D35454"),
-        )
-        val index = url.hashCode().absoluteValue % palette.size
-        return palette[index]
+        val index = url.hashCode().absoluteValue % SITE_ACCENT_PALETTE.size
+        return SITE_ACCENT_PALETTE[index]
     }
 
     private fun showAddHomeSiteDialog() {
@@ -5584,12 +5779,10 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
+    private val displayDensity: Float by lazy { resources.displayMetrics.density }
+
     private fun dp(value: Int): Int {
-        return TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_DIP,
-            value.toFloat(),
-            resources.displayMetrics,
-        ).toInt()
+        return (value * displayDensity + 0.5f).toInt()
     }
 
     private fun textSizeSp(view: TextView): Float {
@@ -5656,6 +5849,7 @@ class MainActivity : AppCompatActivity() {
             store,
             resource,
             overrideTitle = preferredVideoTitleFor(resource),
+            isPrivate = preferences.getDefaultPrivacyDownload(),
         )
         Snackbar.make(binding.root, message, Snackbar.LENGTH_SHORT).show()
     }
@@ -5900,9 +6094,28 @@ class MainActivity : AppCompatActivity() {
             ?: magnet?.let(TorrentTools::titleForMagnet)
             ?: target.substringAfterLast('/').substringBefore('?').ifBlank { target }
         val currentEngine = preferences.getP2pDownloadEngine()
+
+        val privacyCheck = android.widget.CheckBox(this).apply {
+            text = getString(R.string.download_to_privacy)
+            isChecked = preferences.getDefaultPrivacyDownload()
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            addView(android.widget.TextView(this@MainActivity).apply {
+                text = displayTitle.take(180)
+                setTextColor(currentThemePalette.textMuted)
+                textSize = 14f
+                setPadding(0, 0, 0, dp(8))
+            })
+            addView(privacyCheck)
+        }
+
         styleAlertDialog(MaterialAlertDialogBuilder(this))
             .setTitle(if (isMagnet) "下载磁力链接？" else "下载种子文件？")
-            .setMessage(displayTitle.take(180))
+            .setView(container)
             .setNegativeButton(if (copied) "仅复制" else "取消", null)
             .setNeutralButton(currentEngine.alternate().actionLabel) { _, _ ->
                 handleTorrentDownloadChoice(
@@ -5910,6 +6123,7 @@ class MainActivity : AppCompatActivity() {
                     magnet = magnet,
                     displayTitle = displayTitle,
                     engine = currentEngine.alternate(),
+                    isPrivate = privacyCheck.isChecked,
                 )
             }
             .setPositiveButton(currentEngine.actionLabel) { _, _ ->
@@ -5918,6 +6132,7 @@ class MainActivity : AppCompatActivity() {
                     magnet = magnet,
                     displayTitle = displayTitle,
                     engine = currentEngine,
+                    isPrivate = privacyCheck.isChecked,
                 )
             }
             .showThemedAlert()
@@ -5928,6 +6143,7 @@ class MainActivity : AppCompatActivity() {
         magnet: String?,
         displayTitle: String,
         engine: P2pDownloadEngine,
+        isPrivate: Boolean = false,
     ) {
         val pageUrl = viewModel.uiState.value.currentUrl.takeIf { it != DEFAULT_HOME_URL }
         val message = if (magnet != null) {
@@ -5938,6 +6154,7 @@ class MainActivity : AppCompatActivity() {
                 title = displayTitle,
                 pageUrl = pageUrl,
                 engine = engine,
+                isPrivate = isPrivate,
             )
         } else if (engine == P2pDownloadEngine.EXTERNAL) {
             if (BrowserDownloads.openP2pWithExternalApp(this, target, "application/x-bittorrent")) {
@@ -5956,6 +6173,7 @@ class MainActivity : AppCompatActivity() {
                 contentDisposition = null,
                 referer = pageUrl,
                 userAgent = buildUserAgent(effectiveDesktopMode(viewModel.uiState.value.currentUrl)),
+                isPrivate = isPrivate,
             )
         }
         if (message.startsWith("未找到")) {
@@ -6214,6 +6432,9 @@ class MainActivity : AppCompatActivity() {
         val currentHost = currentPage.host?.lowercase() ?: return false
         val targetHost = targetPage.host?.lowercase() ?: return false
         val targetUrl = targetPage.toString().lowercase()
+        if (isGoogleRelatedDomain(targetHost) || isGoogleRelatedDomain(currentHost)) {
+            return false
+        }
         if (ALLOW_AUTOMATIC_REDIRECT_KEYWORDS.any { targetUrl.contains(it) }) {
             return false
         }
@@ -6498,6 +6719,29 @@ class MainActivity : AppCompatActivity() {
             "callback",
             "passport",
             "sso",
+        )
+
+        private val GOOGLE_DOMAINS = setOf(
+            "google.com", "google.com.hk", "google.co.jp", "google.co.uk", "google.de",
+            "google.fr", "google.it", "google.es", "google.ca", "google.com.au",
+            "googleapis.com", "gstatic.com", "googleusercontent.com",
+            "youtube.com", "youtu.be", "ytimg.com",
+            "googleadservices.com", "googlesyndication.com",
+            "googletagmanager.com", "google-analytics.com",
+            "recaptcha.net", "gstatic.cn",
+        )
+
+        private fun isGoogleRelatedDomain(host: String): Boolean {
+            return GOOGLE_DOMAINS.any { host == it || host.endsWith(".$it") }
+        }
+
+        private val SCHEME_REGEX = Regex("^[a-zA-Z][a-zA-Z\\d+.-]*:(//)?")
+        private val IPV4_REGEX = Regex("""\d{1,3}(\.\d{1,3}){3}""")
+
+        private val SITE_ACCENT_PALETTE = intArrayOf(
+            0xFFE85D5D.toInt(), 0xFF2F7CF6.toInt(), 0xFF16A085.toInt(),
+            0xFFF39C12.toInt(), 0xFF7F56D9.toInt(), 0xFF3949AB.toInt(),
+            0xFF00897B.toInt(), 0xFFD35454.toInt(),
         )
     }
 }

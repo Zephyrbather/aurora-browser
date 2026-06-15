@@ -86,6 +86,7 @@ object HlsPackageTools {
         downloadSubdirectory: String = "Aurora",
         cachedPlaylistFile: File? = null,
         segmentConcurrency: Int = DEFAULT_SEGMENT_CONCURRENCY,
+        isPrivate: Boolean = false,
         shouldContinue: (() -> Boolean)? = null,
         onProgress: ((playlistFile: File, downloadedBytes: Long, done: Int, total: Int) -> Unit)? = null,
     ): DownloadedPackage {
@@ -102,9 +103,14 @@ object HlsPackageTools {
                 throw freshError
             }
         }
+        val baseDir = if (isPrivate) {
+            BrowserDownloads.getPrivateDir(context, downloadSubdirectory)
+        } else {
+            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
+        }
         val rootDir = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir,
-            "$downloadSubdirectory/hls/${ResourceTools.sanitizeFileName(title).substringBeforeLast('.')}_${recordId}",
+            baseDir,
+            "${if (isPrivate) "" else "$downloadSubdirectory/"}hls/${ResourceTools.sanitizeFileName(title).substringBeforeLast('.')}_${recordId}",
         ).apply {
             mkdirs()
         }

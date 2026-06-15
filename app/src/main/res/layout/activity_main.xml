@@ -182,6 +182,26 @@
             android:paddingEnd="28dp"
             android:paddingBottom="24dp">
 
+            <ImageView
+                android:id="@+id/homeLogo"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_marginBottom="12dp"
+                android:contentDescription="@string/app_name"
+                android:src="@drawable/ic_browser"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/homeAppName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="24dp"
+                android:text="@string/app_name"
+                android:textColor="@color/aurora_text"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+
             <com.google.android.material.card.MaterialCardView
                 android:id="@+id/homeSearchCard"
                 android:layout_width="match_parent"
@@ -253,6 +273,7 @@
             </com.google.android.material.card.MaterialCardView>
 
             <LinearLayout
+                android:id="@+id/homeQuickActions"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="22dp"
@@ -389,6 +410,7 @@
             </LinearLayout>
 
             <Space
+                android:id="@+id/homeSpacer"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
                 android:layout_weight="1" />
@@ -399,10 +421,17 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent">
 
-            <WebView
-                android:id="@+id/webView"
+            <FrameLayout
+                android:id="@+id/webViewContainer"
                 android:layout_width="match_parent"
-                android:layout_height="match_parent" />
+                android:layout_height="match_parent">
+
+                <WebView
+                    android:id="@+id/webView"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent" />
+
+            </FrameLayout>
 
         </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 

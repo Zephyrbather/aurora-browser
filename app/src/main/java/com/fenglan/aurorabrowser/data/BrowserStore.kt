@@ -167,6 +167,16 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
                 """.trimIndent(),
             )
         }
+        if (oldVersion < 9) {
+            runCatching {
+                db.execSQL(
+                    """
+                    ALTER TABLE $TABLE_DOWNLOADS
+                    ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0
+                    """.trimIndent(),
+                )
+            }
+        }
     }
 
     fun getBookmarks(folderId: Long = ROOT_BOOKMARK_FOLDER_ID): List<BookmarkItem> = synchronized(this) {
@@ -819,6 +829,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         fileSizeBytes: Long?,
         progressPercent: Int?,
         errorMessage: String?,
+        isPrivate: Boolean = false,
     ): Long = synchronized(this) {
         writableDatabase.insert(
             TABLE_DOWNLOADS,
@@ -838,6 +849,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
                 put("progress_percent", progressPercent)
                 put("error_message", errorMessage)
                 put("created_at", System.currentTimeMillis())
+                put("is_private", if (isPrivate) 1 else 0)
             },
         )
     }
@@ -846,6 +858,8 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         category: FileCategory? = null,
         limit: Int? = null,
         systemOnly: Boolean = false,
+        privateOnly: Boolean = false,
+        excludePrivate: Boolean = false,
     ): List<DownloadItem> = synchronized(this) {
         val selection = mutableListOf<String>()
         val selectionArgs = mutableListOf<String>()
@@ -855,6 +869,12 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
         if (systemOnly) {
             selection += "system_download_id IS NOT NULL"
+        }
+        if (privateOnly) {
+            selection += "is_private = 1"
+        }
+        if (excludePrivate) {
+            selection += "is_private = 0"
         }
         readableDatabase.query(
             TABLE_DOWNLOADS,
@@ -915,6 +935,18 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
                 putLongIfChanged("file_size_bytes", fileSizeBytes, clearFileSizeBytes)
                 putIntIfChanged("progress_percent", progressPercent, clearProgressPercent)
                 putStringIfChanged("error_message", errorMessage, clearErrorMessage)
+            },
+            "id = ?",
+            arrayOf(id.toString()),
+        )
+    }
+
+    fun updateDownloadPrivacy(id: Long, isPrivate: Boolean, localUri: String?) = synchronized(this) {
+        writableDatabase.update(
+            TABLE_DOWNLOADS,
+            ContentValues().apply {
+                put("is_private", if (isPrivate) 1 else 0)
+                put("local_uri", localUri)
             },
             "id = ?",
             arrayOf(id.toString()),
@@ -1172,7 +1204,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
         }
 
         private const val DATABASE_NAME = "aurora_browser.db"
-        private const val DATABASE_VERSION = 8
+        private const val DATABASE_VERSION = 9
 
         private const val TABLE_BOOKMARKS = "bookmarks"
         private const val TABLE_HISTORY = "history"
@@ -1389,6 +1421,7 @@ class BrowserStore(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, 
             progressPercent = readIntOrNull(cursor, "progress_percent"),
             errorMessage = cursor.getString(cursor.getColumnIndexOrThrow("error_message")),
             createdAt = cursor.getLong(cursor.getColumnIndexOrThrow("created_at")),
+            isPrivate = cursor.getInt(cursor.getColumnIndexOrThrow("is_private")) == 1,
         )
     }
 

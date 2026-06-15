@@ -161,8 +161,10 @@ object ResourceTools {
         return SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(timestamp))
     }
 
+    private val UNSAFE_FILENAME_REGEX = Regex("[\\\\/:*?\"<>|]")
+
     fun sanitizeFileName(input: String): String {
-        return input.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifBlank {
+        return input.replace(UNSAFE_FILENAME_REGEX, "_").trim().ifBlank {
             "file_${System.currentTimeMillis()}"
         }
     }

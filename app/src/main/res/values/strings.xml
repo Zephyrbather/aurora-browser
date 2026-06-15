@@ -57,6 +57,7 @@
     <string name="cd_magnet_search_action">搜索磁力</string>
     <string name="cd_magnet_history">搜索历史</string>
     <string name="cd_magnet_select_all">全选磁力源</string>
+    <string name="cd_magnet_sources">磁力源管理</string>
     <string name="cd_magnet_add_source">添加磁力源</string>
     <string name="cd_magnet_retry">重试</string>
     <string name="cd_magnet_verify">打开验证</string>
@@ -80,4 +81,15 @@
     <string name="cd_import_bookmarks">导入书签</string>
     <string name="import_bookmarks_title">导入书签</string>
     <string name="import_bookmarks_desc">从 Chrome、Edge 等浏览器导出的 HTML 书签文件导入</string>
+    <string name="home_style_label">首页样式</string>
+    <string name="home_style_default">默认样式</string>
+    <string name="home_style_minimal">极简样式</string>
+    <string name="privacy_download_label">默认下载位置</string>
+    <string name="privacy_download_normal">普通空间</string>
+    <string name="privacy_download_private">隐私空间</string>
+    <string name="privacy_download_hint">隐私空间文件系统文件管理不可见</string>
+    <string name="move_to_privacy">移入隐私空间</string>
+    <string name="move_to_public">移出隐私空间</string>
+    <string name="download_to_privacy">下载到隐私空间</string>
+    <string name="privacy_badge">隐私</string>
 </resources>

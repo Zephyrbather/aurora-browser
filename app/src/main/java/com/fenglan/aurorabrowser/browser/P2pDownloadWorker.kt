@@ -44,14 +44,14 @@ class P2pDownloadWorker(
         val sourceUrl = inputData.getString(KEY_SOURCE_URL) ?: return@withContext Result.failure()
         val title = inputData.getString(KEY_TITLE)?.takeIf { it.isNotBlank() } ?: "P2P_${System.currentTimeMillis()}"
         val outputSubdirectory = inputData.getString(KEY_OUTPUT_SUBDIRECTORY) ?: "Aurora"
+        val isPrivate = inputData.getBoolean(KEY_IS_PRIVATE, false)
         val referer = inputData.getString(KEY_REFERER)?.takeIf { it.isNotBlank() }
         val userAgent = inputData.getString(KEY_USER_AGENT)?.takeIf { it.isNotBlank() }
         val cookieHeader = inputData.getString(KEY_COOKIE)?.takeIf { it.isNotBlank() }
         if (recordId <= 0) {
             return@withContext Result.failure()
         }
-
-        val outputDir = p2pOutputDir(applicationContext, outputSubdirectory, title)
+        val outputDir = p2pOutputDir(applicationContext, outputSubdirectory, title, isPrivate)
         outputDir.mkdirs()
         setForeground(createForegroundInfo(title, 0, "准备 P2P 下载"))
 
@@ -421,6 +421,7 @@ class P2pDownloadWorker(
         const val KEY_SOURCE_URL = "source_url"
         const val KEY_TITLE = "title"
         const val KEY_OUTPUT_SUBDIRECTORY = "output_subdirectory"
+        const val KEY_IS_PRIVATE = "is_private"
         const val KEY_REFERER = "referer"
         const val KEY_USER_AGENT = "user_agent"
         const val KEY_COOKIE = "cookie"
@@ -442,10 +443,15 @@ class P2pDownloadWorker(
         private const val DEFAULT_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Mobile Safari/537.36"
 
-        fun p2pOutputDir(context: Context, subdirectory: String, title: String): File {
-            val root = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
-                ?: File(context.filesDir, "downloads")
-            return File(File(root, subdirectory), "P2P/${ResourceTools.sanitizeFileName(title)}")
+        fun p2pOutputDir(context: Context, subdirectory: String, title: String, isPrivate: Boolean = false): File {
+            return if (isPrivate) {
+                val base = BrowserDownloads.getPrivateDir(context, subdirectory)
+                File(base, "P2P/${ResourceTools.sanitizeFileName(title)}")
+            } else {
+                val root = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                    ?: File(context.filesDir, "downloads")
+                File(File(root, subdirectory), "P2P/${ResourceTools.sanitizeFileName(title)}")
+            }
         }
 
         private fun formatSpeed(bytesPerSecond: Long): String {

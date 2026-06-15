@@ -50,8 +50,8 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/searchButton"
                 style="@style/Widget.MaterialComponents.Button"
-                android:layout_width="42dp"
-                android:layout_height="42dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:contentDescription="搜索"
                 android:insetLeft="0dp"
                 android:insetRight="0dp"
@@ -69,8 +69,8 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/historyButton"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="42dp"
-                android:layout_height="42dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:layout_marginStart="8dp"
                 android:contentDescription="搜索历史"
                 android:insetLeft="0dp"
@@ -87,12 +87,12 @@
                 app:iconPadding="0dp" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/selectAllButton"
+                android:id="@+id/sourceMenuButton"
                 style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="42dp"
-                android:layout_height="42dp"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
                 android:layout_marginStart="8dp"
-                android:contentDescription="全选磁力源"
+                android:contentDescription="@string/cd_magnet_sources"
                 android:insetLeft="0dp"
                 android:insetRight="0dp"
                 android:insetTop="0dp"
@@ -101,43 +101,10 @@
                 android:paddingStart="0dp"
                 android:paddingEnd="0dp"
                 android:text=""
-                app:icon="@drawable/ic_select_all"
-                app:iconGravity="textStart"
-                app:iconPadding="0dp" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/addSourceButton"
-                style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                android:layout_width="42dp"
-                android:layout_height="42dp"
-                android:layout_marginStart="8dp"
-                android:contentDescription="添加磁力源"
-                android:insetLeft="0dp"
-                android:insetRight="0dp"
-                android:insetTop="0dp"
-                android:insetBottom="0dp"
-                android:minWidth="0dp"
-                android:paddingStart="0dp"
-                android:paddingEnd="0dp"
-                android:text=""
-                app:icon="@drawable/ic_add"
+                app:icon="@drawable/ic_magnet"
                 app:iconGravity="textStart"
                 app:iconPadding="0dp" />
         </LinearLayout>
-
-        <HorizontalScrollView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:overScrollMode="never"
-            android:scrollbars="none">
-
-            <com.google.android.material.chip.ChipGroup
-                android:id="@+id/sourceChipGroup"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                app:singleLine="true" />
-        </HorizontalScrollView>
     </LinearLayout>
 
     <ProgressBar

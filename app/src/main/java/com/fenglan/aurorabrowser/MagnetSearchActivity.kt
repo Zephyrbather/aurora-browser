@@ -8,14 +8,20 @@ import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.widget.ImageButton
 import android.widget.LinearLayout
+import android.widget.PopupWindow
+import android.widget.ScrollView
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.isVisible
@@ -23,11 +29,14 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.fenglan.aurorabrowser.browser.BrowserDownloads
 import com.fenglan.aurorabrowser.browser.BrowserPreferences
+import com.fenglan.aurorabrowser.browser.BrowserThemePalette
 import com.fenglan.aurorabrowser.browser.BrowserThemeTools
 import com.fenglan.aurorabrowser.browser.MagnetSearchClient
 import com.fenglan.aurorabrowser.browser.MagnetSearchOutcome
 import com.fenglan.aurorabrowser.browser.MagnetSearchResult
 import com.fenglan.aurorabrowser.browser.MagnetSearchSource
+import com.fenglan.aurorabrowser.browser.MagnetSourceHealth
+import com.fenglan.aurorabrowser.browser.MagnetSourceStatus
 import com.fenglan.aurorabrowser.browser.MagnetSearchSources
 import com.fenglan.aurorabrowser.browser.MagnetSearchStateTools
 import com.fenglan.aurorabrowser.browser.TorrentTools
@@ -36,6 +45,8 @@ import com.fenglan.aurorabrowser.data.BrowserStore
 import com.fenglan.aurorabrowser.databinding.ActivityMagnetSearchBinding
 import com.fenglan.aurorabrowser.model.P2pDownloadEngine
 import com.fenglan.aurorabrowser.ui.MagnetSearchAdapter
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.chip.Chip
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.textfield.TextInputEditText
@@ -64,6 +75,7 @@ class MagnetSearchActivity : AppCompatActivity() {
     private var currentSearchUrls: Map<String, String> = emptyMap()
     private var activeSearchSourceIds: Set<String> = emptySet()
     private var searchJob: Job? = null
+    private var sourceMenuPopup: PopupWindow? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,8 +112,7 @@ class MagnetSearchActivity : AppCompatActivity() {
         }
         binding.searchButton.setOnClickListener { runSearch() }
         binding.historyButton.setOnClickListener { showHistoryDialog() }
-        binding.selectAllButton.setOnClickListener { selectAllSources() }
-        binding.addSourceButton.setOnClickListener { showAddSourceDialog() }
+        binding.sourceMenuButton.setOnClickListener { showSourceMenu() }
 
         applyTheme()
         reloadSources()
@@ -116,6 +127,7 @@ class MagnetSearchActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        sourceMenuPopup?.dismiss()
         searchJob?.cancel()
         super.onDestroy()
     }
@@ -141,7 +153,7 @@ class MagnetSearchActivity : AppCompatActivity() {
         binding.queryInput.setTextColor(palette.text)
         binding.queryInput.setHintTextColor(palette.textMuted)
         styleIconButton(binding.searchButton, filled = true)
-        listOf(binding.historyButton, binding.selectAllButton, binding.addSourceButton).forEach {
+        listOf(binding.historyButton, binding.sourceMenuButton).forEach {
             styleIconButton(it, filled = false)
         }
         binding.openSourceButton.backgroundTintList = ColorStateList.valueOf(palette.accent)
@@ -150,7 +162,7 @@ class MagnetSearchActivity : AppCompatActivity() {
         binding.retrySourceButton.setTextColor(palette.text)
     }
 
-    private fun styleIconButton(button: com.google.android.material.button.MaterialButton, filled: Boolean) {
+    private fun styleIconButton(button: MaterialButton, filled: Boolean) {
         val palette = BrowserThemeTools.paletteFor(preferences.getSettings().themeMode)
         button.cornerRadius = dp(14)
         button.iconSize = dp(20)
@@ -166,31 +178,237 @@ class MagnetSearchActivity : AppCompatActivity() {
         selectedSourceIds = preferences.getSelectedMagnetSourceIds()
             .filter { id -> sources.any { it.id == id } }
             .toCollection(linkedSetOf())
-        if (selectedSourceIds.isEmpty()) {
-            selectedSourceIds.addAll(sources.map { it.id })
-        }
-        renderSourceChips()
+        renderSourceMenuButton()
     }
 
-    private fun renderSourceChips() {
-        binding.sourceChipGroup.removeAllViews()
-        sources.forEach { source ->
-            val chip = Chip(this).apply {
-                text = if (source.isCustom) "${source.label} · 自定义" else source.label
-                isCheckable = true
-                isChecked = source.id in selectedSourceIds
-                isCloseIconVisible = source.isCustom
-                applyChipStyle(this, compact = false)
-                setOnCheckedChangeListener { _, checked ->
-                    if (checked) selectedSourceIds.add(source.id) else selectedSourceIds.remove(source.id)
-                    preferences.setSelectedMagnetSourceIds(selectedSourceIds)
-                    updateSelectedStatus()
-                }
-                setOnCloseIconClickListener { confirmDeleteSource(source) }
-            }
-            binding.sourceChipGroup.addView(chip)
-        }
+    private fun renderSourceMenuButton() {
+        binding.sourceMenuButton.contentDescription = "磁力源管理，已启用 ${selectedSourceIds.size}/${sources.size} 个源"
         updateSelectedStatus()
+    }
+
+    private fun showSourceMenu() {
+        sourceMenuPopup?.dismiss()
+        val palette = BrowserThemeTools.paletteFor(preferences.getSettings().themeMode)
+        val health = preferences.getMagnetSourceHealth()
+        val popupWidth = (resources.displayMetrics.widthPixels - dp(24)).coerceAtMost(dp(380))
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            background = GradientDrawable().apply {
+                cornerRadius = dp(18).toFloat()
+                setColor(palette.surface)
+                setStroke(dp(1), palette.line)
+            }
+        }
+        val headerRow = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.HORIZONTAL
+        }
+        headerRow.addView(
+            TextView(this).apply {
+                text = "磁力源"
+                setTextColor(palette.text)
+                textSize = 16f
+                typeface = Typeface.DEFAULT_BOLD
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f),
+        )
+        val countText = TextView(this).apply {
+            text = sourceMenuCountText()
+            setTextColor(palette.textMuted)
+            textSize = 12f
+        }
+        headerRow.addView(countText)
+        root.addView(headerRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val actionRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        actionRow.addView(
+            createSourceMenuActionButton("启用全部", R.drawable.ic_select_all, filled = false) {
+                enableAllSources()
+            },
+            LinearLayout.LayoutParams(0, dp(48), 1f),
+        )
+        actionRow.addView(
+            createSourceMenuActionButton("停用全部", R.drawable.ic_close, filled = false) {
+                disableAllSources()
+            },
+            LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(8) },
+        )
+        actionRow.addView(
+            createSourceMenuActionButton("添加", R.drawable.ic_add, filled = true) {
+                sourceMenuPopup?.dismiss()
+                showAddSourceDialog()
+            },
+            LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(8) },
+        )
+        root.addView(
+            actionRow,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                topMargin = dp(12)
+            },
+        )
+
+        root.addView(
+            View(this).apply { setBackgroundColor(palette.line) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
+                topMargin = dp(12)
+                bottomMargin = dp(8)
+            },
+        )
+
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        if (sources.isEmpty()) {
+            list.addView(
+                TextView(this).apply {
+                    text = "暂无磁力源"
+                    setTextColor(palette.textMuted)
+                    textSize = 13f
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(64)),
+            )
+        } else {
+            sources.forEach { source ->
+                list.addView(
+                    createSourceMenuRow(source, palette, health[source.id]) {
+                        countText.text = sourceMenuCountText()
+                    },
+                )
+            }
+        }
+        val scrollHeight = (sources.size.coerceAtLeast(1) * dp(62))
+            .coerceAtMost((resources.displayMetrics.heightPixels * 0.52f).toInt())
+            .coerceAtLeast(dp(64))
+        root.addView(
+            ScrollView(this).apply {
+                overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+                addView(list)
+            },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, scrollHeight),
+        )
+
+        val popup = PopupWindow(root, popupWidth, LinearLayout.LayoutParams.WRAP_CONTENT, true).apply {
+            isOutsideTouchable = true
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            elevation = dp(12).toFloat()
+        }
+        sourceMenuPopup = popup
+        val xOffset = binding.sourceMenuButton.width - popupWidth
+        popup.showAsDropDown(binding.sourceMenuButton, xOffset, dp(6))
+    }
+
+    private fun createSourceMenuActionButton(
+        label: String,
+        iconRes: Int,
+        filled: Boolean,
+        onClick: () -> Unit,
+    ): MaterialButton {
+        val palette = BrowserThemeTools.paletteFor(preferences.getSettings().themeMode)
+        return MaterialButton(this).apply {
+            text = label
+            textSize = 12f
+            isAllCaps = false
+            minWidth = 0
+            insetTop = 0
+            insetBottom = 0
+            cornerRadius = dp(14)
+            setPadding(dp(4), 0, dp(4), 0)
+            icon = getDrawable(iconRes)
+            iconSize = dp(18)
+            iconPadding = dp(4)
+            iconTint = ColorStateList.valueOf(if (filled) Color.WHITE else palette.text)
+            backgroundTintList = ColorStateList.valueOf(if (filled) palette.accent else palette.surfaceAlt)
+            strokeWidth = if (filled) 0 else 1
+            strokeColor = ColorStateList.valueOf(palette.line)
+            setTextColor(if (filled) Color.WHITE else palette.text)
+            rippleColor = ColorStateList.valueOf(withAlpha(palette.accent, 36))
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun createSourceMenuRow(
+        source: MagnetSearchSource,
+        palette: BrowserThemePalette,
+        health: MagnetSourceHealth?,
+        onSelectionChanged: () -> Unit,
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(58)
+            setPadding(0, dp(4), 0, dp(4))
+        }
+        val checkBox = MaterialCheckBox(this).apply {
+            isChecked = source.id in selectedSourceIds
+            contentDescription = "启用或停用 ${source.label}"
+            buttonTintList = ColorStateList.valueOf(palette.accent)
+            setOnCheckedChangeListener { _, checked ->
+                if (checked) {
+                    selectedSourceIds.add(source.id)
+                } else {
+                    selectedSourceIds.remove(source.id)
+                }
+                preferences.setSelectedMagnetSourceIds(selectedSourceIds)
+                renderSourceMenuButton()
+                onSelectionChanged()
+            }
+        }
+        row.addView(checkBox, LinearLayout.LayoutParams(dp(48), dp(48)))
+
+        val textStack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        textStack.addView(
+            TextView(this).apply {
+                text = source.label
+                setTextColor(palette.text)
+                textSize = 14f
+                typeface = Typeface.DEFAULT_BOLD
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            },
+        )
+        textStack.addView(
+            TextView(this).apply {
+                text = sourceDetailText(source, health)
+                setTextColor(palette.textMuted)
+                textSize = 11f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            },
+        )
+        row.addView(textStack, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        if (source.isCustom) {
+            row.addView(
+                ImageButton(this).apply {
+                    setImageResource(R.drawable.ic_delete)
+                    contentDescription = "删除磁力源 ${source.label}"
+                    imageTintList = ColorStateList.valueOf(palette.textMuted)
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(Color.TRANSPARENT)
+                    }
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                    setOnClickListener {
+                        sourceMenuPopup?.dismiss()
+                        confirmDeleteSource(source)
+                    }
+                },
+                LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) },
+            )
+        }
+        row.setOnClickListener {
+            checkBox.isChecked = !checkBox.isChecked
+        }
+        return row
     }
 
     private fun applyChipStyle(chip: Chip, compact: Boolean) {
@@ -218,11 +436,67 @@ class MagnetSearchActivity : AppCompatActivity() {
         }
     }
 
-    private fun selectAllSources() {
+    private fun sourceMenuCountText(): String {
+        return "已启用 ${selectedSourceIds.size}/${sources.size}"
+    }
+
+    private fun enableAllSources() {
         selectedSourceIds.clear()
         selectedSourceIds.addAll(sources.map { it.id })
         preferences.setSelectedMagnetSourceIds(selectedSourceIds)
-        renderSourceChips()
+        renderSourceMenuButton()
+        refreshSourceMenu()
+    }
+
+    private fun disableAllSources() {
+        selectedSourceIds.clear()
+        preferences.setSelectedMagnetSourceIds(selectedSourceIds)
+        renderSourceMenuButton()
+        refreshSourceMenu()
+    }
+
+    private fun refreshSourceMenu() {
+        if (sourceMenuPopup?.isShowing == true) {
+            sourceMenuPopup?.dismiss()
+            binding.sourceMenuButton.post { showSourceMenu() }
+        }
+    }
+
+    private fun sourceDetailText(source: MagnetSearchSource, health: MagnetSourceHealth?): String {
+        val type = if (source.isCustom) "自定义" else "内置"
+        val host = sourceHostText(source)
+        val status = health?.let { sourceHealthText(it) }
+        return listOfNotNull(type, host, status).joinToString(" · ")
+    }
+
+    private fun sourceHostText(source: MagnetSearchSource): String? {
+        return runCatching {
+            Uri.parse(source.template).host
+                ?.removePrefix("www.")
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    private fun sourceHealthText(health: MagnetSourceHealth): String {
+        val status = when (health.lastStatus) {
+            MagnetSourceStatus.SUCCESS -> "上次 ${health.lastResultCount} 条"
+            MagnetSourceStatus.EMPTY -> "上次无结果"
+            MagnetSourceStatus.FAILED -> "上次失败"
+            MagnetSourceStatus.VERIFICATION -> "上次需验证"
+        }
+        return "$status，${durationText(health.lastDurationMs)}"
+    }
+
+    private fun durationText(durationMs: Long): String {
+        val safeMs = durationMs.coerceAtLeast(0L)
+        if (safeMs < 1_000L) {
+            return "${safeMs}ms"
+        }
+        if (safeMs < 60_000L) {
+            val tenths = (safeMs + 50L) / 100L
+            return "${tenths / 10L}.${tenths % 10L}s"
+        }
+        return "${safeMs / 1_000L}s"
     }
 
     private fun runSearch() {
@@ -235,7 +509,7 @@ class MagnetSearchActivity : AppCompatActivity() {
             sources.filter { it.id in selectedSourceIds },
         )
         if (selectedSources.isEmpty()) {
-            Toast.makeText(this, "请至少选择一个磁力源", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "请在右上角磁力源中至少启用一个源", Toast.LENGTH_SHORT).show()
             return
         }
         searchJob?.cancel()
@@ -499,8 +773,10 @@ class MagnetSearchActivity : AppCompatActivity() {
         binding.sourceStateCard.isVisible = false
     }
 
+    private val displayDensity: Float by lazy { resources.displayMetrics.density }
+
     private fun dp(value: Int): Int {
-        return (value * resources.displayMetrics.density).toInt()
+        return (value * displayDensity + 0.5f).toInt()
     }
 
     private fun withAlpha(color: Int, alpha: Int): Int {
@@ -627,20 +903,39 @@ class MagnetSearchActivity : AppCompatActivity() {
         val magnet = TorrentTools.extractValidMagnet(value)
         val isMagnet = magnet != null
         val currentEngine = preferences.getP2pDownloadEngine()
+
+        val privacyCheck = android.widget.CheckBox(this).apply {
+            text = getString(R.string.download_to_privacy)
+            isChecked = preferences.getDefaultPrivacyDownload()
+            setPadding(dp(24), dp(8), dp(24), dp(8))
+        }
+
+        val container = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            addView(android.widget.TextView(this@MagnetSearchActivity).apply {
+                text = (title ?: value).take(160)
+                setTextColor(ThemeManager.currentPalette.textMuted)
+                textSize = 14f
+                setPadding(0, 0, 0, dp(8))
+            })
+            addView(privacyCheck)
+        }
+
         ThemeManager.styleAlertDialog(this@MagnetSearchActivity, MaterialAlertDialogBuilder(this@MagnetSearchActivity))
             .setTitle(if (isMagnet) "下载磁力链接？" else "下载种子文件？")
-            .setMessage((title ?: value).take(160))
+            .setView(container)
             .setNegativeButton(if (copied) "仅复制" else "取消", null)
             .setNeutralButton(currentEngine.alternate().actionLabel) { _, _ ->
-                enqueueTorrentDownload(value, title, magnet, currentEngine.alternate())
+                enqueueTorrentDownload(value, title, magnet, currentEngine.alternate(), privacyCheck.isChecked)
             }
             .setPositiveButton(currentEngine.actionLabel) { _, _ ->
-                enqueueTorrentDownload(value, title, magnet, currentEngine)
+                enqueueTorrentDownload(value, title, magnet, currentEngine, privacyCheck.isChecked)
             }
             .show()
     }
 
-    private fun enqueueTorrentDownload(value: String, title: String?, magnet: String?, engine: P2pDownloadEngine) {
+    private fun enqueueTorrentDownload(value: String, title: String?, magnet: String?, engine: P2pDownloadEngine, isPrivate: Boolean = false) {
         val message = if (magnet != null) {
             BrowserDownloads.enqueueMagnetDownload(
                 context = this,
@@ -649,6 +944,7 @@ class MagnetSearchActivity : AppCompatActivity() {
                 title = title,
                 pageUrl = null,
                 engine = engine,
+                isPrivate = isPrivate,
             )
         } else if (engine == P2pDownloadEngine.EXTERNAL) {
             if (BrowserDownloads.openP2pWithExternalApp(this, value, "application/x-bittorrent")) {
@@ -667,6 +963,7 @@ class MagnetSearchActivity : AppCompatActivity() {
                 contentDisposition = null,
                 referer = null,
                 userAgent = null,
+                isPrivate = isPrivate,
             )
         }
         if (message.startsWith("未找到")) {

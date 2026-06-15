@@ -41,6 +41,10 @@ class AdBlocker(context: Context) {
         val requestUrl = requestUri.toString().lowercase()
         val pageHost = pageUri?.host?.lowercase()
 
+        if (pageHost != null && isGoogleDomain(pageHost) && isGoogleDomain(requestHost)) {
+            return false
+        }
+
         if (blockedSuffixSet.contains(requestHost)) {
             return true
         }
@@ -124,5 +128,18 @@ class AdBlocker(context: Context) {
             "0oqtn2", "s8dhjc", "tgutfvr", "rfbswq275", "tppobi",
             "adsco", "trk", "pxl", "dsp", "ssp", "adx",
         )
+
+        private val GOOGLE_DOMAINS = setOf(
+            "google.com", "google.com.hk", "google.co.jp", "google.co.uk",
+            "googleapis.com", "gstatic.com", "googleusercontent.com",
+            "youtube.com", "youtu.be", "ytimg.com",
+            "googleadservices.com", "googlesyndication.com",
+            "googletagmanager.com", "google-analytics.com",
+            "recaptcha.net", "gstatic.cn",
+        )
+
+        private fun isGoogleDomain(host: String): Boolean {
+            return GOOGLE_DOMAINS.any { host == it || host.endsWith(".$it") }
+        }
     }
 }

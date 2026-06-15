@@ -560,10 +560,11 @@ class LibraryActivity : AppCompatActivity() {
 
     private fun downloadSubtitle(item: DownloadItem): String {
         val cat = item.category.label
+        val prefix = if (item.isPrivate) "${getString(R.string.privacy_badge)} · " else ""
         return if (!item.errorMessage.isNullOrBlank()) {
-            "$cat · ${item.errorMessage}"
+            "$prefix$cat · ${item.errorMessage}"
         } else {
-            cat
+            "$prefix$cat"
         }
     }
 
@@ -745,8 +746,9 @@ class LibraryActivity : AppCompatActivity() {
     }
 
     private fun enqueueResourceWithQuality(item: ResourceItem) {
+        val isPrivate = preferences.getDefaultPrivacyDownload()
         if (!item.isStream && item.category != FileCategory.STREAM) {
-            showDownloadFeedback(BrowserDownloads.enqueueFromResource(this, store, item))
+            showDownloadFeedback(BrowserDownloads.enqueueFromResource(this, store, item, isPrivate = isPrivate))
             return
         }
         Snackbar.make(binding.root, "正在解析流媒体清晰度", Snackbar.LENGTH_SHORT).show()
@@ -762,7 +764,7 @@ class LibraryActivity : AppCompatActivity() {
                 }.getOrDefault(emptyList())
             }
             if (variants.isEmpty()) {
-                showDownloadFeedback(BrowserDownloads.enqueueFromResource(this@LibraryActivity, store, item))
+                showDownloadFeedback(BrowserDownloads.enqueueFromResource(this@LibraryActivity, store, item, isPrivate = isPrivate))
                 return@launch
             }
             ThemeManager.styleAlertDialog(this@LibraryActivity, MaterialAlertDialogBuilder(this@LibraryActivity))
@@ -776,7 +778,7 @@ class LibraryActivity : AppCompatActivity() {
                         category = FileCategory.STREAM,
                         isStream = true,
                     )
-                    showDownloadFeedback(BrowserDownloads.enqueueFromResource(this@LibraryActivity, store, resource))
+                    showDownloadFeedback(BrowserDownloads.enqueueFromResource(this@LibraryActivity, store, resource, isPrivate = isPrivate))
                 }
                 .setNegativeButton("取消", null)
                 .show()
@@ -1401,6 +1403,21 @@ class LibraryActivity : AppCompatActivity() {
                 }
             }
         }
+        if (item.status == "已完成") {
+            if (item.isPrivate) {
+                labels += getString(R.string.move_to_public)
+                actions += {
+                    toast(BrowserDownloads.moveToPublic(this, store, item))
+                    loadContent()
+                }
+            } else {
+                labels += getString(R.string.move_to_privacy)
+                actions += {
+                    toast(BrowserDownloads.moveToPrivacy(this, store, item))
+                    loadContent()
+                }
+            }
+        }
         labels += "复制链接"
         actions += {
             copyToClipboard(item.sourceUrl)
@@ -1451,8 +1468,9 @@ class LibraryActivity : AppCompatActivity() {
             LibraryMode.RESOURCES -> {
                 labels += "批量下载"
                 actions += {
+                    val isPrivate = preferences.getDefaultPrivacyDownload()
                     visibleResources.filter { selectedResourceIds.contains(it.id) }.forEach { item ->
-                        BrowserDownloads.enqueueFromResource(this, store, item)
+                        BrowserDownloads.enqueueFromResource(this, store, item, isPrivate = isPrivate)
                     }
                     showDownloadFeedback("已加入 ${selectedIds.size} 项下载")
                     loadContent()

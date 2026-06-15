@@ -50,6 +50,7 @@ class HlsDownloadWorker(
             origin = inputData.getString(KEY_ORIGIN),
         )
         val outputSubdirectory = inputData.getString(KEY_OUTPUT_SUBDIRECTORY) ?: "Aurora"
+        val isPrivate = inputData.getBoolean(KEY_IS_PRIVATE, false)
 
         if (recordId <= 0) {
             return@withContext Result.failure()
@@ -97,6 +98,7 @@ class HlsDownloadWorker(
                 downloadSubdirectory = outputSubdirectory,
                 cachedPlaylistFile = resolvedCached,
                 segmentConcurrency = inputData.getInt(KEY_SEGMENT_CONCURRENCY, 4),
+                isPrivate = isPrivate,
                 shouldContinue = {
                     !isStopped && store.getDownloadStatus(recordId) !in setOf("已暂停", "已取消")
                 },
@@ -198,6 +200,7 @@ class HlsDownloadWorker(
         const val KEY_CACHED_PLAYLIST = "cached_playlist"
         const val KEY_PAGE_URL = "page_url"
         const val KEY_SEGMENT_CONCURRENCY = "segment_concurrency"
+        const val KEY_IS_PRIVATE = "is_private"
 
         fun createChannel(context: Context) {
             val channel = NotificationChannel(

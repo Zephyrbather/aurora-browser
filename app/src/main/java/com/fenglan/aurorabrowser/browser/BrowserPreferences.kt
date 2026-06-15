@@ -3,6 +3,7 @@ package com.fenglan.aurorabrowser.browser
 import android.content.Context
 import com.fenglan.aurorabrowser.model.BrowserSettings
 import com.fenglan.aurorabrowser.model.BrowserThemeMode
+import com.fenglan.aurorabrowser.model.HomeStyle
 import com.fenglan.aurorabrowser.model.P2pDownloadEngine
 import com.fenglan.aurorabrowser.model.SearchEngine
 import com.fenglan.aurorabrowser.model.SearchHistoryItem
@@ -170,7 +171,10 @@ class BrowserPreferences(context: Context) {
 
     fun getSelectedMagnetSourceIds(): Set<String> {
         val available = getMagnetSources().map { it.id }.toSet()
-        val raw = preferences.getString(KEY_SELECTED_MAGNET_SOURCE_IDS, "").orEmpty()
+        val raw = preferences.getString(KEY_SELECTED_MAGNET_SOURCE_IDS, null)
+        if (raw.isNullOrBlank()) {
+            return available
+        }
         val selected = runCatching {
             val json = JSONArray(raw)
             buildSet {
@@ -182,7 +186,7 @@ class BrowserPreferences(context: Context) {
             .filter { it in available }
             .toSet()
         if (selected.isEmpty()) {
-            return available
+            return emptySet()
         }
         return if (selected.containsAll(PREVIOUS_DEFAULT_MAGNET_SOURCE_IDS) ||
             (selected.size == ORIGINAL_DEFAULT_MAGNET_SOURCE_IDS.size && selected.containsAll(ORIGINAL_DEFAULT_MAGNET_SOURCE_IDS))) {
@@ -440,12 +444,37 @@ class BrowserPreferences(context: Context) {
             .apply()
     }
 
+    fun getHomeStyle(): HomeStyle {
+        val key = preferences.getString(KEY_HOME_STYLE, HomeStyle.DEFAULT.key) ?: HomeStyle.DEFAULT.key
+        return HomeStyle.entries.find { it.key == key } ?: HomeStyle.DEFAULT
+    }
+
+    fun setHomeStyle(style: HomeStyle) {
+        preferences.edit().putString(KEY_HOME_STYLE, style.key).apply()
+    }
+
+    fun getHomeVerticalOffset(): Int {
+        return preferences.getInt(KEY_HOME_VERTICAL_OFFSET, 0)
+    }
+
+    fun setHomeVerticalOffset(offset: Int) {
+        preferences.edit().putInt(KEY_HOME_VERTICAL_OFFSET, offset).apply()
+    }
+
+    fun getDefaultPrivacyDownload(): Boolean {
+        return preferences.getBoolean(KEY_DEFAULT_PRIVACY_DOWNLOAD, false)
+    }
+
+    fun setDefaultPrivacyDownload(value: Boolean) {
+        preferences.edit().putBoolean(KEY_DEFAULT_PRIVACY_DOWNLOAD, value).apply()
+    }
+
     private fun normalizeDownloadSubdirectory(path: String?): String {
         return path
             ?.trim()
             ?.replace('\\', '/')
-            ?.replace(Regex("^/+"), "")
-            ?.replace(Regex("/+"), "/")
+            ?.replace(LEADING_SLASHES_REGEX, "")
+            ?.replace(MULTI_SLASHES_REGEX, "/")
             ?.trim('/')
             ?.ifBlank { DEFAULT_DOWNLOAD_SUBDIRECTORY }
             ?: DEFAULT_DOWNLOAD_SUBDIRECTORY
@@ -605,6 +634,9 @@ class BrowserPreferences(context: Context) {
         private const val KEY_THEME_MODE = "theme_mode"
         private const val KEY_DOWNLOAD_SUBDIRECTORY = "download_subdirectory"
         private const val KEY_START_PAGE_URL = "start_page_url"
+        private const val KEY_HOME_STYLE = "home_style"
+        private const val KEY_HOME_VERTICAL_OFFSET = "home_vertical_offset"
+        private const val KEY_DEFAULT_PRIVACY_DOWNLOAD = "default_privacy_download"
         private const val KEY_TRANSLATION_ENGINE = "translation_engine"
         private const val KEY_HLS_CONCURRENCY = "hls_concurrency"
         private const val KEY_SITE_SETTINGS = "site_settings"
@@ -658,5 +690,7 @@ class BrowserPreferences(context: Context) {
         private const val MAX_CUSTOM_MAGNET_SOURCES = 30
         private const val MAX_MAGNET_SEARCH_HISTORY = 50
         private const val MAX_MAGNET_SOURCE_HEALTH = 80
+        private val LEADING_SLASHES_REGEX = Regex("^/+")
+        private val MULTI_SLASHES_REGEX = Regex("/+")
     }
 }

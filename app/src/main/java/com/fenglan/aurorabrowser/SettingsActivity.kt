@@ -34,6 +34,7 @@ import com.fenglan.aurorabrowser.browser.ThemeManager
 import com.fenglan.aurorabrowser.data.BrowserStore
 import com.fenglan.aurorabrowser.databinding.ActivitySettingsBinding
 import com.fenglan.aurorabrowser.model.DEFAULT_HOME_URL
+import com.fenglan.aurorabrowser.model.HomeStyle
 import com.fenglan.aurorabrowser.model.P2pDownloadEngine
 import com.fenglan.aurorabrowser.model.SearchEngine
 import com.fenglan.aurorabrowser.model.TranslationEngine
@@ -80,6 +81,7 @@ class SettingsActivity : AppCompatActivity() {
         binding.downloadPathCard.setOnClickListener { showDownloadPathDialog() }
         binding.hlsConcurrencyCard.setOnClickListener { showHlsConcurrencyDialog() }
         binding.p2pEngineCard.setOnClickListener { showP2pEngineDialog() }
+        binding.privacyDownloadCard.setOnClickListener { showPrivacyDownloadDialog() }
         binding.cacheCleanupCard.setOnClickListener { showCacheCleanupDialog() }
         binding.startPageCard.setOnClickListener { showStartPageDialog() }
         binding.searchEngineCard.setOnClickListener { showSearchEngineDialog() }
@@ -101,10 +103,11 @@ class SettingsActivity : AppCompatActivity() {
         binding.hlsConcurrencySubtitle.text = "同时下载 ${preferences.getHlsConcurrency()} 个 HLS 分片"
         val p2pEngine = preferences.getP2pDownloadEngine()
         binding.p2pEngineSubtitle.text = "${p2pEngine.label} · ${p2pEngine.summary}"
+        binding.privacyDownloadSubtitle.text = if (preferences.getDefaultPrivacyDownload()) getString(R.string.privacy_download_private) else getString(R.string.privacy_download_normal)
         renderCacheSummary()
         binding.startPageSubtitle.text = when (val startPage = preferences.getStartPageUrl()) {
-            DEFAULT_HOME_URL -> "浏览器首页"
-            else -> startPage
+            DEFAULT_HOME_URL -> preferences.getHomeStyle().label
+            else -> "${preferences.getHomeStyle().label} · $startPage"
         }
         binding.searchEngineSubtitle.text = preferences.getSearchEngine().label
         binding.translationEngineSubtitle.text = preferences.getTranslationEngine().label
@@ -126,6 +129,20 @@ class SettingsActivity : AppCompatActivity() {
             .setPositiveButton("选择文件夹") { _, _ ->
                 downloadFolderLauncher.launch(null)
             }
+            .showThemed()
+    }
+
+    private fun showPrivacyDownloadDialog() {
+        val options = arrayOf(getString(R.string.privacy_download_normal), getString(R.string.privacy_download_private))
+        val current = if (preferences.getDefaultPrivacyDownload()) 1 else 0
+        themedDialog()
+            .setTitle(getString(R.string.privacy_download_label))
+            .setSingleChoiceItems(options, current) { dialog, which ->
+                preferences.setDefaultPrivacyDownload(which == 1)
+                renderSettingsSummary()
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
             .showThemed()
     }
 
@@ -218,22 +235,79 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun showStartPageDialog() {
+        val styles = HomeStyle.entries
+        val currentStyle = preferences.getHomeStyle()
+        var selectedStyle = currentStyle
+
+        val currentUrl = preferences.getStartPageUrl().takeIf { it != DEFAULT_HOME_URL }.orEmpty()
+
+        ensurePalette()
+
+        val styleLabel = TextView(this).apply {
+            text = getString(R.string.home_style_label)
+            setTextColor(currentPalette.textMuted)
+            textSize = 12f
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+        }
+
+        val styleGroup = android.widget.RadioGroup(this).apply {
+            orientation = android.widget.RadioGroup.VERTICAL
+            styles.forEach { style ->
+                addView(android.widget.RadioButton(this@SettingsActivity).apply {
+                    id = View.generateViewId()
+                    text = style.label
+                    isChecked = style == currentStyle
+                    setTextColor(currentPalette.text)
+                    buttonTintList = ColorStateList.valueOf(currentPalette.accent)
+                    setOnClickListener { selectedStyle = style }
+                    minimumHeight = dp(48)
+                })
+            }
+        }
+
+        val divider = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(1),
+            ).apply {
+                topMargin = dp(12)
+                bottomMargin = dp(8)
+            }
+            setBackgroundColor(currentPalette.line)
+        }
+
+        val urlLabel = TextView(this).apply {
+            text = "自定义网址"
+            setTextColor(currentPalette.textMuted)
+            textSize = 12f
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+
         val input = EditText(this).apply {
             setSingleLine()
             hint = "留空则使用浏览器首页"
-            setText(
-                preferences.getStartPageUrl().takeIf { it != DEFAULT_HOME_URL }.orEmpty(),
-            )
+            setText(currentUrl)
             setSelection(text?.length ?: 0)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
         styleDialogInput(input)
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), 0, dp(24), 0)
+            addView(styleLabel)
+            addView(styleGroup)
+            addView(divider)
+            addView(urlLabel)
+            addView(input)
+        }
+
         themedDialog()
             .setTitle("自定义初始页")
-            .setMessage("留空使用浏览器首页，也可以填写完整网址")
-            .setView(input)
+            .setView(container)
             .setNegativeButton("取消", null)
             .setNeutralButton("恢复首页") { _, _ ->
+                preferences.setHomeStyle(HomeStyle.DEFAULT)
                 preferences.setStartPageUrl(DEFAULT_HOME_URL)
                 renderSettingsSummary()
             }
@@ -243,6 +317,7 @@ class SettingsActivity : AppCompatActivity() {
                     Toast.makeText(this, "请输入有效网址", Toast.LENGTH_SHORT).show()
                     return@setPositiveButton
                 }
+                preferences.setHomeStyle(selectedStyle)
                 preferences.setStartPageUrl(resolved)
                 renderSettingsSummary()
             }
@@ -544,8 +619,10 @@ class SettingsActivity : AppCompatActivity() {
         )
     }
 
+    private val displayDensity: Float by lazy { resources.displayMetrics.density }
+
     private fun dp(value: Int): Int {
-        return (value * resources.displayMetrics.density).toInt()
+        return (value * displayDensity + 0.5f).toInt()
     }
 
     private fun textSizeSp(view: TextView): Float {

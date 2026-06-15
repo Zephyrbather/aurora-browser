@@ -15,7 +15,7 @@ class LocalPlaylistServer(
     private val rootDir: File,
 ) {
     private val serverSocket = ServerSocket(0)
-    private val executor = Executors.newCachedThreadPool()
+    private val executor = Executors.newFixedThreadPool(4)
     @Volatile private var running = true
 
     val baseUrl: String = "http://127.0.0.1:${serverSocket.localPort}/"

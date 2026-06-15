@@ -9,6 +9,8 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Locale
+import android.util.Log
+import kotlinx.coroutines.runBlocking
 
 data class PageTextSegment(
     val id: String,
@@ -24,7 +26,11 @@ data class TranslationRunResult(
     val items: List<TranslatedPageText>,
     val engineUsed: TranslationEngine,
     val usedFallback: Boolean = false,
+    val translatedCount: Int = items.size,
+    val totalCount: Int = items.size,
 )
+
+typealias WebViewJsEvaluator = suspend (String) -> String
 
 object PageTranslator {
     const val TARGET_LANGUAGE_LABEL = "简体中文"
@@ -35,108 +41,77 @@ object PageTranslator {
     private const val BATCH_SIZE = 6
     private const val BATCH_CHAR_LIMIT = 1400
 
+    private val sessionCache = HashMap<String, String>()
+
+    fun clearSessionCache() {
+        sessionCache.clear()
+    }
+
     fun buildCollectScript(limit: Int = MAX_SEGMENTS): String {
+        val maxLen = limit.coerceAtMost(MAX_SEGMENTS).coerceAtLeast(1)
         return """
             (function() {
               try {
-                var clearExisting = function() {
-                  document.querySelectorAll('ruby[data-aurora-translation-unit="1"]').forEach(function(node) {
-                    var original = node.getAttribute('data-aurora-source');
-                    if (!original) {
-                      var sourceNode = node.querySelector('.__aurora_translation_source');
-                      original = sourceNode ? sourceNode.textContent : '';
-                    }
-                    node.replaceWith(document.createTextNode(original || ''));
-                  });
-                  var styleNode = document.getElementById('__aurora_translation_style__');
-                  if (styleNode) {
-                    styleNode.remove();
-                  }
-                };
-                clearExisting();
-                if (!document.body && !document.documentElement) {
-                  return '[]';
+                var old = document.querySelectorAll('[data-aurora-translation-unit="1"]');
+                for (var i = 0; i < old.length; i++) {
+                  var n = old[i];
+                  var orig = n.getAttribute('data-aurora-source') || '';
+                  if (!orig) { var s = n.querySelector('.__aurora_translation_source'); orig = s ? s.textContent : ''; }
+                  n.replaceWith(document.createTextNode(orig));
                 }
-                var ensureStyle = function() {
-                  var styleNode = document.getElementById('__aurora_translation_style__');
-                  if (!styleNode) {
-                    styleNode = document.createElement('style');
-                    styleNode.id = '__aurora_translation_style__';
-                    (document.head || document.documentElement).appendChild(styleNode);
-                  }
-                  styleNode.textContent =
-                    'ruby[data-aurora-translation-unit="1"]{ruby-position:under;white-space:pre-wrap;line-height:1.65;}' +
-                    'ruby[data-aurora-translation-unit="1"] rt.__aurora_translation_text{' +
-                    'color:#3b82f6;font-size:0.72em;line-height:1.35;white-space:normal;}' +
-                    'ruby[data-aurora-translation-unit="1"] .__aurora_translation_source{color:inherit;}';
-                };
-                ensureStyle();
+                var os = document.getElementById('__aurora_translation_style__');
+                if (os) os.remove();
                 var root = document.body || document.documentElement;
+                if (!root) return '[]';
+                var st = document.createElement('style');
+                st.id = '__aurora_translation_style__';
+                st.textContent = '.__aurora_translation_text{color:#3b82f6;font-size:0.75em;line-height:1.4;}.__aurora_translation_text.__aurora_block{display:block;margin-top:2px;}.__aurora_translation_text.__aurora_inline{display:inline;margin-left:6px;}.__aurora_translation_source{color:inherit;}';
+                (document.head || document.documentElement).appendChild(st);
+                var SKIP = {SCRIPT:1,STYLE:1,NOSCRIPT:1,TEXTAREA:1,INPUT:1,SELECT:1,OPTION:1,BUTTON:1,CANVAS:1,SVG:1,CODE:1,PRE:1,KBD:1,SAMP:1,IFRAME:1,OBJECT:1,EMBED:1};
+                var BLOCK = {H1:1,H2:1,H3:1,H4:1,H5:1,H6:1,P:1,LI:1,TD:1,TH:1,DD:1,DT:1,FIGCAPTION:1,CAPTION:1,BLOCKQUOTE:1,DIV:1,SECTION:1,ARTICLE:1,HEADER:1,FOOTER:1,MAIN:1,ASIDE:1,NAV:1,SUMMARY:1};
+                var collected = [];
+                var all = root.getElementsByTagName('*');
+                for (var i = 0; i < all.length && collected.length < $maxLen; i++) {
+                  var el = all[i];
+                  if (el.getAttribute('data-aurora-translation-unit') === '1') continue;
+                  if (SKIP[el.tagName]) continue;
+                  if (el.style && (el.style.display === 'none' || el.style.visibility === 'hidden')) continue;
+                  var child = el.firstChild;
+                  while (child) {
+                    if (child.nodeType === 3) {
+                      var t = String(child.nodeValue || '').replace(/\s+/g, ' ').trim();
+                      if (t.length >= 2 && t.length <= $MAX_SEGMENT_TEXT_LENGTH && /[A-Za-z\u00C0-\u024F\u4E00-\u9FFF]/.test(t) && !/^(https?:\/\/|www\.)/i.test(t)) {
+                        collected.push({node:child, text:t, raw:String(child.nodeValue||''), block:BLOCK[el.tagName]?1:0});
+                        if (collected.length >= $maxLen) break;
+                      }
+                    }
+                    child = child.nextSibling;
+                  }
+                }
                 var results = [];
                 var seed = String(Date.now());
-                var shouldSkip = function(parent, text) {
-                  if (!parent || !text) {
-                    return true;
-                  }
-                  if (parent.closest && parent.closest(
-                    '[data-aurora-translation-unit="1"],script,style,noscript,textarea,input,select,option,button,canvas,svg,code,pre,kbd,samp'
-                  )) {
-                    return true;
-                  }
-                  var compact = String(text).replace(/\s+/g, ' ').trim();
-                  if (!compact || compact.length < 2 || compact.length > $MAX_SEGMENT_TEXT_LENGTH) {
-                    return true;
-                  }
-                  if (!/[A-Za-z\u00C0-\u024F\u4E00-\u9FFF]/.test(compact)) {
-                    return true;
-                  }
-                  if (/^(https?:\/\/|www\.)/i.test(compact)) {
-                    return true;
-                  }
-                  var style = window.getComputedStyle(parent);
-                  if (!style || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) {
-                    return true;
-                  }
-                  var rect = parent.getBoundingClientRect();
-                  return !rect || rect.width < 4 || rect.height < 4;
-                };
-                var walker = document.createTreeWalker(
-                  root,
-                  NodeFilter.SHOW_TEXT,
-                  {
-                    acceptNode: function(node) {
-                      return shouldSkip(node && node.parentElement, node && node.nodeValue)
-                        ? NodeFilter.FILTER_REJECT
-                        : NodeFilter.FILTER_ACCEPT;
-                    }
-                  }
-                );
-                var current;
-                while ((current = walker.nextNode()) && results.length < ${limit.coerceAtMost(MAX_SEGMENTS).coerceAtLeast(1)}) {
-                  var raw = String(current.nodeValue || '');
-                  var compact = raw.replace(/\s+/g, ' ').trim();
-                  var wrapper = document.createElement('ruby');
-                  var id = 'aurora_translate_' + seed + '_' + results.length;
-                  wrapper.setAttribute('data-aurora-translation-unit', '1');
-                  wrapper.setAttribute('data-aurora-translation-id', id);
-                  wrapper.setAttribute('data-aurora-source', raw);
-                  var source = document.createElement('span');
-                  source.className = '__aurora_translation_source';
-                  source.textContent = raw;
-                  var translation = document.createElement('rt');
-                  translation.className = '__aurora_translation_text';
-                  translation.textContent = '翻译中...';
-                  wrapper.appendChild(source);
-                  wrapper.appendChild(translation);
-                  if (current.parentNode) {
-                    current.parentNode.replaceChild(wrapper, current);
-                    results.push({ id: id, text: compact });
-                  }
+                for (var i = 0; i < collected.length; i++) {
+                  var it = collected[i];
+                  var cur = it.node;
+                  if (!cur.parentNode) continue;
+                  var id = 'aurora_translate_' + seed + '_' + i;
+                  var w = document.createElement('span');
+                  w.setAttribute('data-aurora-translation-unit', '1');
+                  w.setAttribute('data-aurora-translation-id', id);
+                  w.setAttribute('data-aurora-source', it.raw);
+                  var src = document.createElement('span');
+                  src.className = '__aurora_translation_source';
+                  src.textContent = it.raw;
+                  var tgt = document.createElement('span');
+                  tgt.className = '__aurora_translation_text ' + (it.block ? '__aurora_block' : '__aurora_inline');
+                  tgt.textContent = '...';
+                  w.appendChild(src);
+                  w.appendChild(tgt);
+                  cur.parentNode.replaceChild(w, cur);
+                  results.push({id:id, text:it.text});
                 }
                 return JSON.stringify(results);
-              } catch (error) {
-                return '[]';
-              }
+              } catch(e) { return JSON.stringify([{error:e.message||'unknown'}]); }
             })();
         """.trimIndent()
     }
@@ -157,15 +132,11 @@ object PageTranslator {
               try {
                 var items = JSON.parse(${JSONObject.quote(payload)});
                 items.forEach(function(item) {
-                  var selector = 'ruby[data-aurora-translation-id="' + String(item.id).replace(/"/g, '\\"') + '"]';
+                  var selector = '[data-aurora-translation-id="' + String(item.id).replace(/"/g, '\\"') + '"]';
                   var node = document.querySelector(selector);
-                  if (!node) {
-                    return;
-                  }
-                  var translation = node.querySelector('rt.__aurora_translation_text');
-                  if (translation) {
-                    translation.textContent = String(item.text || '');
-                  }
+                  if (!node) return;
+                  var tgt = node.querySelector('.__aurora_translation_text');
+                  if (tgt) { tgt.textContent = String(item.text || ''); }
                 });
               } catch (error) {}
             })();
@@ -176,7 +147,7 @@ object PageTranslator {
         return """
             (function() {
               try {
-                document.querySelectorAll('ruby[data-aurora-translation-unit="1"]').forEach(function(node) {
+                document.querySelectorAll('[data-aurora-translation-unit="1"]').forEach(function(node) {
                   var original = node.getAttribute('data-aurora-source');
                   if (!original) {
                     var sourceNode = node.querySelector('.__aurora_translation_source');
@@ -185,9 +156,7 @@ object PageTranslator {
                   node.replaceWith(document.createTextNode(original || ''));
                 });
                 var styleNode = document.getElementById('__aurora_translation_style__');
-                if (styleNode) {
-                  styleNode.remove();
-                }
+                if (styleNode) { styleNode.remove(); }
               } catch (error) {}
             })();
         """.trimIndent()
@@ -213,30 +182,47 @@ object PageTranslator {
         engine: TranslationEngine,
         segments: List<PageTextSegment>,
         preferences: BrowserPreferences,
+        webViewEval: WebViewJsEvaluator? = null,
     ): TranslationRunResult {
         if (segments.isEmpty()) {
             return TranslationRunResult(emptyList(), engine)
         }
+        val uncachedSegments = segments.filter { sessionCache[it.text] == null }
         val translations = mutableMapOf<String, String>()
-        val batches = buildBatches(segments)
-        var engineUsed = engine
-        var usedFallback = false
-        batches.forEach { batch ->
-            val translatedBatch = try {
-                translateBatch(engine, batch, preferences)
-            } catch (error: Throwable) {
-                if (engine == TranslationEngine.MICROSOFT) {
-                    engineUsed = TranslationEngine.GOOGLE
-                    usedFallback = true
-                    translateBatch(TranslationEngine.GOOGLE, batch, preferences)
+        segments.forEach { seg ->
+            sessionCache[seg.text]?.let { translations[seg.id] = it }
+        }
+        Log.d("PageTranslator", "translate: ${segments.size} segments, ${uncachedSegments.size} uncached, engine=$engine")
+        if (uncachedSegments.isNotEmpty()) {
+            val batches = buildBatches(uncachedSegments)
+            batches.forEachIndexed { batchIndex, batch ->
+                if (batchIndex > 0) Thread.sleep(500)
+                val translatedBatch = if (webViewEval != null) {
+                    batch.map { segment ->
+                        val cached = sessionCache[segment.text]
+                        if (!cached.isNullOrBlank()) return@map cached
+                        val httpResult = translateSingleWithFallback(segment.text, preferences)
+                        if (httpResult.isNotBlank()) return@map httpResult
+                        translateSingleViaWebView(segment.text, webViewEval)
+                    }
                 } else {
-                    throw error
+                    try {
+                        translateBatchWithFallback(engine, batch, preferences)
+                    } catch (error: Throwable) {
+                        Log.w("PageTranslator", "Batch fallback: ${error.message?.take(60)}")
+                        batch.map { segment -> translateSingleWithFallback(segment.text, preferences) }
+                    }
+                }
+                batch.zip(translatedBatch).forEach { (segment, translatedText) ->
+                    if (translatedText.isNotBlank()) {
+                        translations[segment.id] = translatedText
+                        sessionCache[segment.text] = translatedText
+                    }
                 }
             }
-            batch.zip(translatedBatch).forEach { (segment, translatedText) ->
-                translations[segment.id] = translatedText
-            }
         }
+        val translatedCount = translations.values.count { it.isNotBlank() }
+        Log.d("PageTranslator", "translate result: $translatedCount/${segments.size} translated")
         return TranslationRunResult(
             items = segments.map { segment ->
                 TranslatedPageText(
@@ -244,8 +230,10 @@ object PageTranslator {
                     translatedText = translations[segment.id].orEmpty(),
                 )
             },
-            engineUsed = engineUsed,
-            usedFallback = usedFallback,
+            engineUsed = engine,
+            usedFallback = false,
+            translatedCount = translatedCount,
+            totalCount = segments.size,
         )
     }
 
@@ -288,6 +276,98 @@ object PageTranslator {
                     )
                 }
             }
+    }
+
+    private fun translateBatchWithFallback(
+        engine: TranslationEngine,
+        batch: List<PageTextSegment>,
+        preferences: BrowserPreferences,
+    ): List<String> {
+        val engines = mutableListOf(engine)
+        if (engine != TranslationEngine.GOOGLE) {
+            engines.add(TranslationEngine.GOOGLE)
+        }
+        var lastError: Throwable? = null
+        for (eng in engines) {
+            try {
+                val result = translateBatch(eng, batch, preferences)
+                if (result.any { it.isNotBlank() }) return result
+            } catch (e: Throwable) {
+                lastError = e
+            }
+        }
+        throw lastError ?: IllegalStateException("all translation engines failed")
+    }
+
+    private fun translateSingleWithFallback(
+        text: String,
+        preferences: BrowserPreferences,
+    ): String {
+        val engines = listOf(TranslationEngine.GOOGLE, TranslationEngine.MICROSOFT)
+        for (eng in engines) {
+            try {
+                val result = when (eng) {
+                    TranslationEngine.GOOGLE -> translateWithGoogle(text)
+                    TranslationEngine.MICROSOFT -> translateWithMicrosoft(text)
+                    TranslationEngine.BAIDU -> translateWithBaidu(
+                        text = text,
+                        appId = preferences.getBaiduAppId(),
+                        secret = preferences.getBaiduSecret(),
+                    )
+                    TranslationEngine.YOUDAO -> translateWithYoudao(
+                        text = text,
+                        appKey = preferences.getYoudaoAppKey(),
+                        appSecret = preferences.getYoudaoAppSecret(),
+                    )
+                }
+                if (result.isNotBlank()) return result
+            } catch (_: Throwable) { }
+        }
+        return ""
+    }
+
+    private fun translateSingleViaWebView(
+        text: String,
+        eval: WebViewJsEvaluator,
+    ): String {
+        return runCatching {
+            Log.d("PageTranslator", "WebView fallback for: ${text.take(30)}")
+            val js = buildWebViewTranslateScript(text)
+            val result = runBlocking { eval(js) }
+            val cleaned = result.removeSurrounding("\"").replace("\\n", "\n").replace("\\\"", "\"")
+            Log.d("PageTranslator", "WebView result: ${cleaned.take(50)}")
+            if (cleaned.isNotBlank() && cleaned != "null" && !cleaned.startsWith("<!")) cleaned else ""
+        }.getOrElse {
+            Log.w("PageTranslator", "WebView error: ${it.message?.take(60)}")
+            ""
+        }
+    }
+
+    fun buildWebViewTranslateScript(text: String): String {
+        return """
+            (async function() {
+              try {
+                var urls = [
+                  'https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=' + encodeURIComponent(${JSONObject.quote(text)}),
+                  'https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=zh-CN&q=' + encodeURIComponent(${JSONObject.quote(text)})
+                ];
+                for (var i = 0; i < urls.length; i++) {
+                  try {
+                    var resp = await fetch(urls[i], {credentials: 'omit'});
+                    if (!resp.ok) continue;
+                    var data = await resp.json();
+                    if (Array.isArray(data) && data.length > 0 && Array.isArray(data[0])) {
+                      return data[0].map(function(a){return a[0]||''}).join('');
+                    }
+                    if (Array.isArray(data) && data.length > 0 && typeof data[0] === 'string') {
+                      return data.join('');
+                    }
+                  } catch(e) {}
+                }
+                return '';
+              } catch(e) { return ''; }
+            })();
+        """.trimIndent()
     }
 
     private fun buildBatches(segments: List<PageTextSegment>): List<List<PageTextSegment>> {
@@ -339,48 +419,77 @@ object PageTranslator {
     }
 
     private fun translateWithGoogle(text: String): String {
-        return runCatching {
-            val payload = httpGet(
-                url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encode(text)}",
-                accept = "application/json,text/plain,*/*",
-            )
-            val root = JSONArray(payload)
-            val translatedChunks = root.optJSONArray(0) ?: return@runCatching ""
-            buildString {
-                for (index in 0 until translatedChunks.length()) {
-                    append(translatedChunks.optJSONArray(index)?.optString(0).orEmpty())
+        val endpoints = listOf(
+            "https://lingva.ml/api/v1/auto/zh/${encode(text)}",
+            "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=zh-CN&q=${encode(text)}",
+            "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=${encode(text)}",
+        )
+        for (endpoint in endpoints) {
+            try {
+                val payload = httpGet(endpoint, accept = "application/json,text/plain,*/*")
+                if (payload.isBlank() || payload.startsWith("<!")) continue
+                if (endpoint.contains("lingva.ml")) {
+                    val root = JSONObject(payload)
+                    val result = root.optString("translation", "")
+                    if (result.isNotBlank()) return result
+                } else {
+                    val root = JSONArray(payload)
+                    val translatedChunks = root.optJSONArray(0) ?: continue
+                    val result = buildString {
+                        for (index in 0 until translatedChunks.length()) {
+                            append(translatedChunks.optJSONArray(index)?.optString(0).orEmpty())
+                        }
+                    }
+                    if (result.isNotBlank()) return result
                 }
+            } catch (e: Throwable) {
+                Log.w("PageTranslator", "Translate failed (${endpoint.substringBefore("?").take(40)}): ${e.message?.take(60)}")
             }
-        }.getOrElse {
-            translateWithMyMemory(text)
+            Thread.sleep(300)
+        }
+        return try {
+            val result = translateWithMyMemory(text)
+            if (result.isNotBlank()) result else throw IllegalStateException("mymemory empty")
+        } catch (e: Throwable) {
+            Log.w("PageTranslator", "All engines failed: ${e.message?.take(60)}")
+            throw e
         }
     }
 
     private fun translateWithMicrosoft(text: String): String {
-        val token = fetchMicrosoftToken()
-        val endpoint = "https://cn.bing.com/ttranslatev3?isVertical=1&IG=${token.ig}&IID=translator.5028.1"
-        val response = httpPostForm(
-            url = endpoint,
-            form = linkedMapOf(
-                "fromLang" to "auto-detect",
-                "to" to "zh-Hans",
-                "text" to text,
-                "token" to token.token,
-                "key" to token.key,
-            ),
-            referer = "https://cn.bing.com/translator",
-        )
-        if (response.contains("\"ShowCaptcha\":true", ignoreCase = true)) {
-            throw IllegalStateException("microsoft translator captcha")
-        }
-        val root = JSONArray(response)
-        return buildString {
-            for (index in 0 until root.length()) {
-                val item = root.optJSONObject(index) ?: continue
-                val translations = item.optJSONArray("translations") ?: continue
-                append(translations.optJSONObject(0)?.optString("text").orEmpty())
+        var lastError: Throwable? = null
+        repeat(2) { attempt ->
+            try {
+                val token = fetchMicrosoftToken()
+                val endpoint = "https://cn.bing.com/ttranslatev3?isVertical=1&IG=${token.ig}&IID=translator.5028.1"
+                val response = httpPostForm(
+                    url = endpoint,
+                    form = linkedMapOf(
+                        "fromLang" to "auto-detect",
+                        "to" to "zh-Hans",
+                        "text" to text,
+                        "token" to token.token,
+                        "key" to token.key,
+                    ),
+                    referer = "https://cn.bing.com/translator",
+                )
+                if (response.contains("\"ShowCaptcha\":true", ignoreCase = true)) {
+                    throw IllegalStateException("microsoft translator captcha")
+                }
+                val root = JSONArray(response)
+                return buildString {
+                    for (index in 0 until root.length()) {
+                        val item = root.optJSONObject(index) ?: continue
+                        val translations = item.optJSONArray("translations") ?: continue
+                        append(translations.optJSONObject(0)?.optString("text").orEmpty())
+                    }
+                }
+            } catch (e: Throwable) {
+                lastError = e
+                if (attempt == 0) Thread.sleep(1000)
             }
         }
+        throw lastError ?: IllegalStateException("microsoft translation failed")
     }
 
     private fun translateWithBaidu(text: String, appId: String, secret: String): String {
@@ -492,8 +601,8 @@ object PageTranslator {
     private fun openConnection(url: String): HttpURLConnection {
         return (URL(url).openConnection() as HttpURLConnection).apply {
             instanceFollowRedirects = true
-            connectTimeout = 8000
-            readTimeout = 8000
+            connectTimeout = 10000
+            readTimeout = 10000
             setRequestProperty("Accept-Language", Locale.getDefault().toLanguageTag() + ",zh-CN;q=0.9,en;q=0.8")
             setRequestProperty("User-Agent", USER_AGENT)
         }
@@ -502,11 +611,11 @@ object PageTranslator {
     private fun HttpURLConnection.readResponse(): String {
         return try {
             val stream = if (responseCode in 200..299) inputStream else errorStream
-            stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty().also {
-                if (responseCode !in 200..299) {
-                    throw IllegalStateException(if (it.isBlank()) "http $responseCode" else it)
-                }
+            val body = stream?.bufferedReader(StandardCharsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (responseCode !in 200..299) {
+                throw IllegalStateException(if (body.isBlank()) "http $responseCode" else body.take(200))
             }
+            body
         } finally {
             disconnect()
         }

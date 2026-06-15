@@ -72,15 +72,15 @@ enum class P2pDownloadEngine(val key: String, val label: String, val summary: St
 }
 
 enum class TranslationEngine(val key: String, val label: String, val requiresCredential: Boolean = false) {
-    MICROSOFT("microsoft", "微软翻译"),
     GOOGLE("google", "谷歌翻译"),
+    MICROSOFT("microsoft", "微软翻译"),
     BAIDU("baidu", "百度翻译", true),
     YOUDAO("youdao", "有道翻译", true),
     ;
 
     companion object {
         fun fromKey(key: String?): TranslationEngine {
-            return entries.firstOrNull { it.key == key } ?: MICROSOFT
+            return entries.firstOrNull { it.key == key } ?: GOOGLE
         }
     }
 }
@@ -185,6 +185,7 @@ data class DownloadItem(
     val progressPercent: Int?,
     val errorMessage: String?,
     val createdAt: Long,
+    val isPrivate: Boolean = false,
 )
 
 data class SavedCredentialItem(
@@ -231,3 +232,8 @@ data class BrowserUiState(
 )
 
 const val DEFAULT_HOME_URL = "about:blank"
+
+enum class HomeStyle(val key: String, val label: String) {
+    DEFAULT("default", "默认样式"),
+    MINIMAL("minimal", "极简样式"),
+}

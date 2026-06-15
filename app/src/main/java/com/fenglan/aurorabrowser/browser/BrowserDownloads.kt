@@ -40,6 +40,15 @@ object BrowserDownloads {
     private val cacheScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val activePlaylistCaches = Collections.synchronizedSet(mutableSetOf<String>())
 
+    fun getPrivateDir(context: Context, subdirectory: String = "Aurora"): File {
+        val base = context.getExternalFilesDir(null) ?: File(context.filesDir, "privacy")
+        return File(base, "privacy/$subdirectory")
+    }
+
+    fun sanitizeFileName(name: String): String {
+        return ResourceTools.sanitizeFileName(name)
+    }
+
     data class HlsVariantOption(
         val url: String,
         val label: String,
@@ -58,6 +67,7 @@ object BrowserDownloads {
         referer: String?,
         userAgent: String?,
         declaredSize: Long? = null,
+        isPrivate: Boolean = false,
     ): String {
         val downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory()
         val category = ResourceTools.classify(url, mimeType)
@@ -117,6 +127,7 @@ object BrowserDownloads {
                 fileSizeBytes = estimatedSize ?: declaredSize,
                 progressPercent = 0,
                 errorMessage = null,
+                isPrivate = isPrivate,
             )
             enqueueHlsWork(
                 context = context,
@@ -132,8 +143,39 @@ object BrowserDownloads {
                 cachedPlaylistPath = cacheFile.takeIf { hasCache }?.absolutePath,
                 pageUrl = pageUrl,
                 segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
+                isPrivate = isPrivate,
             )
             "已加入流媒体下载队列"
+        } else if (isPrivate) {
+            val recordId = store.insertDownload(
+                title = fileName,
+                sourceUrl = url,
+                pageUrl = pageUrl,
+                mimeType = mimeType,
+                category = category,
+                downloadType = "private",
+                systemDownloadId = null,
+                localUri = null,
+                status = "已排队",
+                downloadedBytes = 0L,
+                fileSizeBytes = declaredSize,
+                progressPercent = 0,
+                errorMessage = null,
+                isPrivate = true,
+            )
+            enqueuePrivateWork(
+                context = context,
+                recordId = recordId,
+                url = url,
+                title = fileName,
+                referer = resolvedReferer,
+                userAgent = userAgent,
+                cookieHeader = cookieHeader,
+                originHeader = originHeader,
+                downloadSubdirectory = downloadSubdirectory,
+                declaredSize = declaredSize,
+            )
+            "已加入隐私下载队列"
         } else {
             val systemId = enqueueSystemDownload(
                 context = context,
@@ -171,6 +213,7 @@ object BrowserDownloads {
         store: BrowserStore,
         item: com.fenglan.aurorabrowser.model.ResourceItem,
         overrideTitle: String? = null,
+        isPrivate: Boolean = false,
     ): String {
         return enqueue(
             context = context,
@@ -183,6 +226,7 @@ object BrowserDownloads {
             referer = item.referer ?: item.pageUrl,
             userAgent = item.userAgent,
             declaredSize = null,
+            isPrivate = isPrivate,
         )
     }
 
@@ -193,6 +237,7 @@ object BrowserDownloads {
         title: String? = null,
         pageUrl: String? = null,
         engine: P2pDownloadEngine = BrowserPreferences(context).getP2pDownloadEngine(),
+        isPrivate: Boolean = false,
     ): String {
         val normalized = TorrentTools.extractValidMagnet(magnet) ?: return "无效磁力链接"
         return enqueueP2pDownload(
@@ -206,6 +251,7 @@ object BrowserDownloads {
             userAgent = null,
             cookieHeader = null,
             engine = engine,
+            isPrivate = isPrivate,
         )
     }
 
@@ -231,6 +277,7 @@ object BrowserDownloads {
         userAgent: String?,
         cookieHeader: String?,
         engine: P2pDownloadEngine,
+        isPrivate: Boolean = false,
     ): String {
         if (engine == P2pDownloadEngine.EXTERNAL) {
             val opened = openP2pWithExternalApp(context, sourceUrl)
@@ -257,6 +304,7 @@ object BrowserDownloads {
             fileSizeBytes = null,
             progressPercent = 0,
             errorMessage = if (isMagnet) "等待磁力元数据" else "等待种子解析",
+            isPrivate = isPrivate,
         )
         enqueueP2pWork(
             context = context,
@@ -267,6 +315,7 @@ object BrowserDownloads {
             referer = referer,
             userAgent = userAgent,
             cookieHeader = cookieHeader,
+            isPrivate = isPrivate,
         )
         return "已加入 P2P 下载队列"
     }
@@ -355,7 +404,7 @@ object BrowserDownloads {
 
     fun pauseDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
         return when (item.downloadType) {
-            "hls", "p2p" -> {
+            "hls", "p2p", "private" -> {
                 WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
                 store.updateDownload(
                     id = item.id,
@@ -414,6 +463,7 @@ object BrowserDownloads {
                         downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
                         pageUrl = item.pageUrl,
                         segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
+                        isPrivate = item.isPrivate,
                     )
                 } else {
                     enqueueP2pWork(
@@ -425,8 +475,37 @@ object BrowserDownloads {
                         referer = item.pageUrl,
                         userAgent = null,
                         cookieHeader = resolveCookieHeader(item.sourceUrl, item.pageUrl),
+                        isPrivate = item.isPrivate,
                     )
                 }
+                store.updateDownload(
+                    id = item.id,
+                    status = "下载中",
+                    localUri = item.localUri,
+                    downloadedBytes = item.downloadedBytes,
+                    fileSizeBytes = item.fileSizeBytes,
+                    progressPercent = item.progressPercent ?: 0,
+                    errorMessage = "继续下载",
+                )
+                "已继续下载"
+            }
+
+            "private" -> {
+                val resource = resolveResourceForDownload(store, item)
+                val referer = resource?.referer ?: item.pageUrl
+                val userAgent = resource?.userAgent
+                enqueuePrivateWork(
+                    context = context,
+                    recordId = item.id,
+                    url = item.sourceUrl,
+                    title = item.title,
+                    referer = referer,
+                    userAgent = userAgent,
+                    cookieHeader = resolveCookieHeader(item.sourceUrl, referer),
+                    originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl),
+                    downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                    declaredSize = item.fileSizeBytes,
+                )
                 store.updateDownload(
                     id = item.id,
                     status = "下载中",
@@ -499,6 +578,7 @@ object BrowserDownloads {
                         downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
                         pageUrl = item.pageUrl,
                         segmentConcurrency = BrowserPreferences(context).getHlsConcurrency(),
+                        isPrivate = item.isPrivate,
                     )
                 } else {
                     enqueueP2pWork(
@@ -510,6 +590,7 @@ object BrowserDownloads {
                         referer = item.pageUrl,
                         userAgent = null,
                         cookieHeader = resolveCookieHeader(item.sourceUrl, item.pageUrl),
+                        isPrivate = item.isPrivate,
                     )
                 }
                 store.updateDownload(
@@ -520,6 +601,37 @@ object BrowserDownloads {
                     fileSizeBytes = item.fileSizeBytes,
                     progressPercent = item.progressPercent ?: 0,
                     errorMessage = "重新下载",
+                )
+                "已重新下载"
+            }
+
+            "private" -> {
+                WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
+                val resource = resolveResourceForDownload(store, item)
+                val referer = resource?.referer ?: item.pageUrl
+                val userAgent = resource?.userAgent
+                enqueuePrivateWork(
+                    context = context,
+                    recordId = item.id,
+                    url = item.sourceUrl,
+                    title = item.title,
+                    referer = referer,
+                    userAgent = userAgent,
+                    cookieHeader = resolveCookieHeader(item.sourceUrl, referer),
+                    originHeader = resolveOriginHeader(referer) ?: resolveOriginHeader(item.sourceUrl),
+                    downloadSubdirectory = BrowserPreferences(context).getDownloadSubdirectory(),
+                    declaredSize = item.fileSizeBytes,
+                )
+                store.updateDownloadRequest(
+                    id = item.id,
+                    systemDownloadId = null,
+                    status = "下载中",
+                    localUri = null,
+                    downloadedBytes = 0L,
+                    fileSizeBytes = item.fileSizeBytes,
+                    progressPercent = 0,
+                    errorMessage = "重新下载",
+                    clearLocalUri = true,
                 )
                 "已重新下载"
             }
@@ -591,7 +703,7 @@ object BrowserDownloads {
 
     fun cancelDownload(context: Context, store: BrowserStore, item: DownloadItem): String {
         when (item.downloadType) {
-            "hls", "hls_export", "p2p" -> {
+            "hls", "hls_export", "p2p", "private" -> {
                 WorkManager.getInstance(context).cancelAllWorkByTag(downloadWorkTag(item.id))
                 if (!item.localUri.isNullOrBlank()) {
                     deleteLocalFile(context, item)
@@ -663,71 +775,77 @@ object BrowserDownloads {
     fun refreshSystemDownloads(context: Context, store: BrowserStore) {
         val manager = context.getSystemService(DownloadManager::class.java)
         val tracked = store.getDownloads(systemOnly = true)
-        tracked.forEach { item ->
-            val systemId = item.systemDownloadId ?: return@forEach
-            val cursor = manager.query(DownloadManager.Query().setFilterById(systemId))
-            cursor.use {
-                if (!it.moveToFirst()) {
-                    return@forEach
-                }
+        if (tracked.isEmpty()) return
+        val systemIds = tracked.mapNotNull { it.systemDownloadId }.toLongArray()
+        if (systemIds.isEmpty()) return
+        val cursor = manager.query(DownloadManager.Query().setFilterById(*systemIds))
+        val statusMap = mutableMapOf<Long, Triple<Int, Long?, Long?>>()
+        cursor.use {
+            while (it.moveToNext()) {
+                val id = it.getLong(it.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
                 val statusCode = it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                val reason = it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
                 val downloadedBytes = readLongOrNull(it, DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
                 val bytes = readLongOrNull(it, DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
-                val progress = if (downloadedBytes != null && bytes != null && bytes > 0) {
-                    ((downloadedBytes * 100f) / bytes).toInt().coerceIn(0, 100)
-                } else {
-                    null
+                statusMap[id] = Triple(statusCode, downloadedBytes, bytes)
+            }
+        }
+        tracked.forEach { item ->
+            val systemId = item.systemDownloadId ?: return@forEach
+            val (statusCode, downloadedBytes, bytes) = statusMap[systemId] ?: return@forEach
+            val progress = if (downloadedBytes != null && bytes != null && bytes > 0) {
+                ((downloadedBytes * 100f) / bytes).toInt().coerceIn(0, 100)
+            } else {
+                null
+            }
+            val uri = manager.getUriForDownloadedFile(systemId)?.toString()
+            when (statusCode) {
+                DownloadManager.STATUS_SUCCESSFUL -> {
+                    store.updateDownloadBySystemId(
+                        systemId,
+                        "已完成",
+                        uri,
+                        bytes,
+                        bytes,
+                        100,
+                        null,
+                        clearErrorMessage = true,
+                    )
                 }
-                val uri = manager.getUriForDownloadedFile(systemId)?.toString()
-                    ?: readStringOrNull(it, DownloadManager.COLUMN_LOCAL_URI)
-                when (statusCode) {
-                    DownloadManager.STATUS_SUCCESSFUL -> {
-                        store.updateDownloadBySystemId(
-                            systemId,
-                            "已完成",
-                            uri,
-                            bytes,
-                            bytes,
-                            100,
-                            null,
-                            clearErrorMessage = true,
-                        )
-                    }
 
-                    DownloadManager.STATUS_FAILED -> {
-                        store.updateDownloadBySystemId(systemId, "失败", uri, downloadedBytes, bytes, progress, "系统下载失败($reason)")
-                    }
+                DownloadManager.STATUS_FAILED -> {
+                    val reason = 0
+                    store.updateDownloadBySystemId(systemId, "失败", uri, downloadedBytes, bytes, progress, "系统下载失败($reason)")
+                }
 
-                    DownloadManager.STATUS_PAUSED -> {
-                        store.updateDownloadBySystemId(systemId, "已暂停", uri, downloadedBytes, bytes, progress, "暂停($reason)")
-                    }
+                DownloadManager.STATUS_PAUSED -> {
+                    val reason = 0
+                    store.updateDownloadBySystemId(systemId, "已暂停", uri, downloadedBytes, bytes, progress, "暂停($reason)")
+                }
 
-                    DownloadManager.STATUS_PENDING -> {
-                        store.updateDownloadBySystemId(
-                            systemId,
-                            "等待中",
-                            uri,
-                            downloadedBytes,
-                            bytes,
-                            progress,
-                            null,
-                            clearErrorMessage = true,
-                        )
-                    }
+                DownloadManager.STATUS_PENDING -> {
+                    store.updateDownloadBySystemId(
+                        systemId,
+                        "等待中",
+                        uri,
+                        downloadedBytes,
+                        bytes,
+                        progress,
+                        null,
+                        clearErrorMessage = true,
+                    )
+                }
 
-                    DownloadManager.STATUS_RUNNING -> {
-                        store.updateDownloadBySystemId(
-                            systemId,
-                            "下载中",
-                            uri,
-                            downloadedBytes,
-                            bytes,
-                            progress,
-                            null,
-                            clearErrorMessage = true,
-                        )
-                    }
+                DownloadManager.STATUS_RUNNING -> {
+                    store.updateDownloadBySystemId(
+                        systemId,
+                        "下载中",
+                        uri,
+                        downloadedBytes,
+                        bytes,
+                        progress,
+                        null,
+                        clearErrorMessage = true,
+                    )
                 }
             }
         }
@@ -771,6 +889,67 @@ object BrowserDownloads {
         }
     }
 
+    fun moveToPrivacy(context: Context, store: BrowserStore, item: DownloadItem): String {
+        if (item.isPrivate) return "已在隐私空间"
+        if (item.status != "已完成") return "仅已完成的下载可移入隐私空间"
+        val srcUri = item.localUri?.let { Uri.parse(it) } ?: return "文件路径无效"
+        val srcFile = when (srcUri.scheme) {
+            "file" -> File(requireNotNull(srcUri.path))
+            "content" -> null
+            else -> null
+        }
+        val subdirectory = BrowserPreferences(context).getDownloadSubdirectory()
+        val destDir = getPrivateDir(context, subdirectory)
+        destDir.mkdirs()
+        val sanitizedName = sanitizeFileName(item.title)
+        val destFile = File(destDir, sanitizedName)
+        try {
+            if (srcFile != null && srcFile.exists()) {
+                srcFile.copyTo(destFile, overwrite = true)
+                srcFile.delete()
+            } else if (srcUri.scheme == "content") {
+                context.contentResolver.openInputStream(srcUri)?.use { input ->
+                    FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                } ?: return "无法读取源文件"
+                context.contentResolver.delete(srcUri, null, null)
+            } else {
+                return "源文件不存在"
+            }
+            val newUri = Uri.fromFile(destFile).toString()
+            store.updateDownloadPrivacy(item.id, true, newUri)
+            return "已移入隐私空间"
+        } catch (e: Exception) {
+            destFile.delete()
+            return "移动失败: ${e.message?.take(50)}"
+        }
+    }
+
+    fun moveToPublic(context: Context, store: BrowserStore, item: DownloadItem): String {
+        if (!item.isPrivate) return "已在普通空间"
+        if (item.status != "已完成") return "仅已完成的下载可移出隐私空间"
+        val srcUri = item.localUri?.let { Uri.parse(it) } ?: return "文件路径无效"
+        val srcFile = when (srcUri.scheme) {
+            "file" -> File(requireNotNull(srcUri.path))
+            else -> return "文件路径不支持"
+        }
+        if (!srcFile.exists()) return "源文件不存在"
+        val subdirectory = BrowserPreferences(context).getDownloadSubdirectory()
+        val destDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), subdirectory)
+        destDir.mkdirs()
+        val sanitizedName = sanitizeFileName(item.title)
+        val destFile = File(destDir, sanitizedName)
+        try {
+            srcFile.copyTo(destFile, overwrite = true)
+            srcFile.delete()
+            val newUri = Uri.fromFile(destFile).toString()
+            store.updateDownloadPrivacy(item.id, false, newUri)
+            return "已移出隐私空间"
+        } catch (e: Exception) {
+            destFile.delete()
+            return "移动失败: ${e.message?.take(50)}"
+        }
+    }
+
     fun canPause(item: DownloadItem): Boolean {
         return item.downloadType != "hls_export" &&
             item.status in setOf("下载中", "等待中", "重试中", "已排队")
@@ -781,7 +960,7 @@ object BrowserDownloads {
     }
 
     fun canRetry(item: DownloadItem): Boolean {
-        return item.status == "失败" && item.downloadType in setOf("hls", "progressive", "hls_export", "p2p")
+        return item.status == "失败" && item.downloadType in setOf("hls", "progressive", "hls_export", "p2p", "private")
     }
 
     fun canCancel(item: DownloadItem): Boolean {
@@ -816,6 +995,12 @@ object BrowserDownloads {
                 else -> false
             }
         }
+        if (item.downloadType == "private") {
+            return when (uri.scheme?.lowercase()) {
+                "file" -> runCatching { File(requireNotNull(uri.path)).delete() }.getOrDefault(false)
+                else -> false
+            }
+        }
         val deletedBySystem = if (item.systemDownloadId != null) {
             val manager = context.getSystemService(DownloadManager::class.java)
             runCatching { manager.remove(item.systemDownloadId) > 0 }.getOrDefault(false)
@@ -847,6 +1032,7 @@ object BrowserDownloads {
         cachedPlaylistPath: String? = null,
         pageUrl: String? = null,
         segmentConcurrency: Int = 4,
+        isPrivate: Boolean = false,
     ) {
         val data = Data.Builder()
             .putLong(HlsDownloadWorker.KEY_RECORD_ID, recordId)
@@ -859,6 +1045,7 @@ object BrowserDownloads {
             .putString(HlsDownloadWorker.KEY_MIME_TYPE, mimeType)
             .putString(HlsDownloadWorker.KEY_OUTPUT_SUBDIRECTORY, downloadSubdirectory)
             .putInt(HlsDownloadWorker.KEY_SEGMENT_CONCURRENCY, segmentConcurrency.coerceIn(1, 8))
+            .putBoolean(HlsDownloadWorker.KEY_IS_PRIVATE, isPrivate)
         if (!cachedPlaylistPath.isNullOrBlank()) {
             data.putString(HlsDownloadWorker.KEY_CACHED_PLAYLIST, cachedPlaylistPath)
         }
@@ -904,6 +1091,43 @@ object BrowserDownloads {
         WorkManager.getInstance(context).enqueue(request)
     }
 
+    private fun enqueuePrivateWork(
+        context: Context,
+        recordId: Long,
+        url: String,
+        title: String,
+        referer: String?,
+        userAgent: String?,
+        cookieHeader: String?,
+        originHeader: String?,
+        downloadSubdirectory: String,
+        declaredSize: Long?,
+    ) {
+        val data = Data.Builder()
+            .putLong(PrivateDownloadWorker.KEY_RECORD_ID, recordId)
+            .putString(PrivateDownloadWorker.KEY_URL, url)
+            .putString(PrivateDownloadWorker.KEY_TITLE, title)
+            .putString(PrivateDownloadWorker.KEY_REFERER, referer)
+            .putString(PrivateDownloadWorker.KEY_USER_AGENT, userAgent)
+            .putString(PrivateDownloadWorker.KEY_COOKIE, cookieHeader)
+            .putString(PrivateDownloadWorker.KEY_ORIGIN, originHeader)
+            .putString(PrivateDownloadWorker.KEY_OUTPUT_SUBDIRECTORY, downloadSubdirectory)
+        if (declaredSize != null && declaredSize > 0) {
+            data.putLong(PrivateDownloadWorker.KEY_DECLARED_SIZE, declaredSize)
+        }
+        val request = OneTimeWorkRequestBuilder<PrivateDownloadWorker>()
+            .setConstraints(
+                Constraints.Builder()
+                    .setRequiredNetworkType(NetworkType.CONNECTED)
+                    .build(),
+            )
+            .addTag(downloadWorkTag(recordId))
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, java.time.Duration.ofSeconds(10))
+            .setInputData(data.build())
+            .build()
+        WorkManager.getInstance(context).enqueue(request)
+    }
+
     private fun enqueueP2pWork(
         context: Context,
         recordId: Long,
@@ -913,6 +1137,7 @@ object BrowserDownloads {
         referer: String? = null,
         userAgent: String? = null,
         cookieHeader: String? = null,
+        isPrivate: Boolean = false,
     ) {
         val request = OneTimeWorkRequestBuilder<P2pDownloadWorker>()
             .setConstraints(
@@ -931,6 +1156,7 @@ object BrowserDownloads {
                     .putString(P2pDownloadWorker.KEY_REFERER, referer)
                     .putString(P2pDownloadWorker.KEY_USER_AGENT, userAgent)
                     .putString(P2pDownloadWorker.KEY_COOKIE, cookieHeader)
+                    .putBoolean(P2pDownloadWorker.KEY_IS_PRIVATE, isPrivate)
                     .build(),
             )
             .build()

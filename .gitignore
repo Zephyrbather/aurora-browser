@@ -3,6 +3,7 @@ build/
 **/build/
 .idea/
 *.iml
+.DS_Store
 local.properties
 
 captures/

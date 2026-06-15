@@ -85,8 +85,10 @@ class MagnetSearchAdapter(
             binding.openButton.rippleColor = ColorStateList.valueOf(withAlpha(Color.WHITE, 42))
         }
 
+        private val displayDensity: Float by lazy { binding.root.resources.displayMetrics.density }
+
         private fun dp(value: Int): Int {
-            return (value * binding.root.resources.displayMetrics.density).toInt()
+            return (value * displayDensity + 0.5f).toInt()
         }
 
         private fun withAlpha(color: Int, alpha: Int): Int {
